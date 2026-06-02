@@ -8,12 +8,14 @@ import { positioningAudit } from "@/lib/jobs/positioning-audit";
 /**
  * Inngest webhook endpoint.
  *
- * Receives invocations for every function below. In dev, Inngest's local
- * dev server connects here. In production, the Inngest cloud service does.
- *
- * Add new functions to this array as they're written.
+ * `serve()` returns route handlers compatible with Next.js App Router.
+ * We cast to `any` to avoid the Inngest v3 / Next.js 16 type mismatch —
+ * the runtime behaviour is correct; only the TypeScript generics disagree.
  */
-export const { GET, POST, PUT } = serve({
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const { GET, POST, PUT } = serve({
   client: inngest,
   functions: [signalDecay, signalEmbed, signalDedupe, positioningAudit],
-});
+}) as any;
+
+export { GET, POST, PUT };
