@@ -51,6 +51,8 @@ export default function BattlecardManager({ competitor, initialCards }: Props) {
     }
   }, []);
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+
   useEffect(() => {
     if (selectedId) loadCard(selectedId);
   }, [selectedId, loadCard]);

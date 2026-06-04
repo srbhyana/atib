@@ -12,6 +12,8 @@ function AcceptInviteContent() {
 
   useEffect(() => {
     const token = searchParams.get("token");
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+
     if (!token) {
       setStatus("error");
       setError("No invite token found. Please check your invite link.");

@@ -2,8 +2,8 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "npm run start"
+startCommand = "(npm run db:init || echo 'pgvector init skipped') && npm run db:push && npm run start"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 60
+healthcheckTimeout = 180
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

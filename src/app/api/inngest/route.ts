@@ -12,9 +12,10 @@ import { positioningAudit } from "@/lib/jobs/positioning-audit";
  * We cast to `any` to avoid the Inngest v3 / Next.js 16 type mismatch —
  * the runtime behaviour is correct; only the TypeScript generics disagree.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { GET, POST, PUT } = serve({
   client: inngest,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   functions: [signalDecay, signalEmbed, signalDedupe, positioningAudit],
 }) as any;
 

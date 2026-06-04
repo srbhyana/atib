@@ -4,11 +4,9 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: process.cwd(),
   },
-  eslint: {
-    // Warning: This allows production builds to successfully complete even if
-    // your project has ESLint errors.
-    ignoreDuringBuilds: true,
-  },
+  // Next.js 16 removed the `eslint` config block — ESLint is now a separate
+  // `next lint` step, not part of `next build`. We rely on `npm run lint`
+  // locally + in CI rather than build-time enforcement.
   typescript: {
     // !! WARN !!
     // Dangerously allow production builds to successfully complete even if

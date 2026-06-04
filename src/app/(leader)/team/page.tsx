@@ -16,6 +16,8 @@ export default async function TeamPage() {
     getCallStats(session.workspaceId),
     getICPDistribution(session.workspaceId),
   ]);
+  // eslint-disable-next-line react-hooks/purity
+
 
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 

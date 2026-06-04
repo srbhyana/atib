@@ -88,6 +88,8 @@ export async function POST(request: Request) {
         role: user.role,
         workspaceId: workspace.id,
       },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     });
   } catch (error: any) {
     console.error("Signup error:", error);

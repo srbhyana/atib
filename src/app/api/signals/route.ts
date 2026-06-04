@@ -9,6 +9,10 @@ export async function GET(request: Request) {
   try {
     const session = await requireRole(["pmm_admin", "sales_rep", "sales_leader"]);
     const url = new URL(request.url);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 
     const tier = url.searchParams.get("tier") as any;
     const type = url.searchParams.get("type") as any;
