@@ -4,22 +4,54 @@ import * as schema from "./schema";
 
 /**
  * Shared connection pool.
- * Uses node-postgres (pg) over TCP so it works with Railway's standard
- * Postgres (the old Neon HTTP driver only works with Neon's cloud proxy).
  *
- * SSL is disabled for Railway's private network (*.railway.internal) and
- * enabled (self-signed accepted) for all public URLs.
+ * Railway's internal Postgres (`*.railway.internal`) does NOT speak SSL —
+ * the internal network is trusted. The public proxy (`*.proxy.rlwy.net` /
+ * `*.up.railway.app`) DOES require SSL with a self-signed cert.
+ *
+ * We auto-detect the host type so the same code works in the deployed
+ * container AND from a developer's laptop hitting the public URL.
  */
+function isInternalRailwayHost(url: string): boolean {
+  try {
+    return new URL(url).hostname.endsWith(".railway.internal");
+  } catch {
+    return false;
+  }
+}
+
+function stripSslMode(url: string): string {
+  // Remove ?sslmode=... or &sslmode=... so our explicit ssl option takes
+  // precedence. Railway's internal host doesn't speak SSL and pg will
+  // "Connection terminated unexpectedly" if it attempts a TLS handshake.
+  try {
+    const u = new URL(url);
+    u.searchParams.delete("sslmode");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function createPool() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
+  const rawUrl = process.env.DATABASE_URL;
+  if (!rawUrl) {
     throw new Error("DATABASE_URL environment variable is not set");
   }
-  // DATABASE_URL contains ?sslmode=no-verify for Railway's self-signed cert Postgres.
-  // Pass ssl with checkServerIdentity override to fully bypass cert validation.
+
+  const url = stripSslMode(rawUrl);
+  const isInternal = isInternalRailwayHost(url);
+  const ssl = isInternal
+    ? false
+    : { rejectUnauthorized: false, checkServerIdentity: () => undefined };
+
   return new Pool({
     connectionString: url,
-    ssl: { rejectUnauthorized: false, checkServerIdentity: () => undefined },
+    ssl,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+    max: 5,
+    keepAlive: true,
   });
 }
 
@@ -86,7 +118,7 @@ export async function withWorkspace<T>(
       `SET LOCAL app.current_workspace_id = '${workspaceId}'`
     );
     const scopedDb = drizzle(client, { schema });
-    return await fn(scopedDb as ReturnType<typeof getInstance>);
+    return await fn(scopedDb as unknown as ReturnType<typeof getInstance>);
   } finally {
     client.release();
   }

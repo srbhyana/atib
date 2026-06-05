@@ -2,7 +2,11 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "(npm run db:init || echo 'pgvector init skipped') && npm run db:push && npm run start"
+# start:prod wraps init-db (pgvector) + non-interactive drizzle-kit push +
+# next start in a single Node process. It self-bootstraps the schema on
+# every boot (both ops are idempotent) so we never have to manually run
+# `railway run npm run db:push`.
+startCommand = "npm run start:prod"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 180
 restartPolicyType = "on_failure"
