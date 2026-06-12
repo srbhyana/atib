@@ -19,13 +19,11 @@ import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
-function isInternalRailwayHost(url: string): boolean {
-  try {
-    return new URL(url).hostname.endsWith(".railway.internal");
-  } catch {
-    return false;
-  }
-}
+// Railway's postgres-ssl:18 template REQUIRES SSL on every connection — even
+// from inside the Railway network. (Earlier we tried to disable SSL for
+// `*.railway.internal`; that caused "Connection terminated unexpectedly" on
+// every query because the server slams the connection closed.)
+// Always-on SSL with rejectUnauthorized:false is the correct setting.
 
 function run(label: string, cmd: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -51,14 +49,12 @@ async function runMigrations(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
 
-  const isInternal = isInternalRailwayHost(url);
-  console.log(
-    `[start-prod] migrations: ssl = ${isInternal ? "off (internal)" : "on, no-verify (public)"}`
-  );
+  // Always SSL with self-signed accepted — see top-of-file comment for why.
+  console.log("[start-prod] migrations: ssl = on, no-verify");
 
   const pool = new Pool({
     connectionString: url,
-    ssl: isInternal ? false : { rejectUnauthorized: false },
+    ssl: { rejectUnauthorized: false },
     connectionTimeoutMillis: 10_000,
     max: 2,
   });

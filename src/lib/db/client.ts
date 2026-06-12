@@ -5,25 +5,16 @@ import * as schema from "./schema";
 /**
  * Shared connection pool.
  *
- * Railway's internal Postgres (`*.railway.internal`) does NOT speak SSL —
- * the internal network is trusted. The public proxy (`*.proxy.rlwy.net` /
- * `*.up.railway.app`) DOES require SSL with a self-signed cert.
+ * Railway's Postgres template is `postgres-ssl:18`, which REQUIRES SSL on
+ * every connection — including from inside the Railway network. The previous
+ * "internal = no SSL" assumption was wrong and caused `Connection terminated
+ * unexpectedly` on every query.
  *
- * We auto-detect the host type so the same code works in the deployed
- * container AND from a developer's laptop hitting the public URL.
+ * We always negotiate SSL, accepting Railway's self-signed cert. Works for
+ * both the internal `*.railway.internal` host AND the public proxy URL.
  */
-function isInternalRailwayHost(url: string): boolean {
-  try {
-    return new URL(url).hostname.endsWith(".railway.internal");
-  } catch {
-    return false;
-  }
-}
-
 function stripSslMode(url: string): string {
-  // Remove ?sslmode=... or &sslmode=... so our explicit ssl option takes
-  // precedence. Railway's internal host doesn't speak SSL and pg will
-  // "Connection terminated unexpectedly" if it attempts a TLS handshake.
+  // Strip user-supplied sslmode= so our explicit ssl option always wins.
   try {
     const u = new URL(url);
     u.searchParams.delete("sslmode");
@@ -39,15 +30,9 @@ function createPool() {
     throw new Error("DATABASE_URL environment variable is not set");
   }
 
-  const url = stripSslMode(rawUrl);
-  const isInternal = isInternalRailwayHost(url);
-  const ssl = isInternal
-    ? false
-    : { rejectUnauthorized: false, checkServerIdentity: () => undefined };
-
   return new Pool({
-    connectionString: url,
-    ssl,
+    connectionString: stripSslMode(rawUrl),
+    ssl: { rejectUnauthorized: false, checkServerIdentity: () => undefined },
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
     max: 5,

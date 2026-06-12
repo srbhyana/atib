@@ -11,27 +11,18 @@ import "dotenv/config";
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 import { Client } from "pg";
 
-function isInternalRailwayHost(url: string): boolean {
-  try {
-    return new URL(url).hostname.endsWith(".railway.internal");
-  } catch {
-    return false;
-  }
-}
-
 async function main() {
   const url = process.env.DATABASE_URL;
   if (!url) { console.error("DATABASE_URL not set"); process.exit(1); }
   console.log("init-db: connecting to", url.replace(/:[^@]+@/, ":***@"));
 
-  const ssl = isInternalRailwayHost(url)
-    ? false
-    : { rejectUnauthorized: false };
-  console.log(`init-db: ssl = ${ssl === false ? "off (internal)" : "on, no-verify (public)"}`);
+  // Railway's postgres-ssl:18 template REQUIRES SSL on every connection,
+  // including internal. Always negotiate SSL, accept the self-signed cert.
+  console.log("init-db: ssl = on, no-verify");
 
   const client = new Client({
     connectionString: url,
-    ssl,
+    ssl: { rejectUnauthorized: false },
   });
 
   await client.connect();
