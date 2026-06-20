@@ -144,14 +144,15 @@ export function canAccessRoute(role: Role, path: string): boolean {
 export function getDefaultRoute(role: Role): string {
   switch (role) {
     case "pmm_admin":
-      return "/";
+      return "/signals";
     case "sales_rep":
       return "/capture";
     case "sales_leader":
       return "/team";
     case "viewer":
-      return "/";
+      return "/export";
     default:
       return "/";
   }
 }
+
