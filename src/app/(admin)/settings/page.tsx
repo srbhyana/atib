@@ -2,7 +2,14 @@
 
 import { useState, useEffect } from "react";
 
-type Tab = "api" | "team" | "workspace";
+type Tab = "api" | "team" | "import" | "workspace";
+
+const TAB_LABELS: Record<Tab, string> = {
+  api: "API Keys",
+  team: "Team",
+  import: "Import",
+  workspace: "Workspace",
+};
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("api");
@@ -18,7 +25,7 @@ export default function SettingsPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 p-1 rounded-lg bg-[var(--color-atib-surface)] w-fit">
-        {(["api", "team", "workspace"] as const).map((t) => (
+        {(["api", "team", "import", "workspace"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -28,13 +35,14 @@ export default function SettingsPage() {
                 : "text-[var(--color-atib-text-muted)] hover:text-[var(--color-atib-text)]"
             }`}
           >
-            {t === "api" ? "API Keys" : t === "team" ? "Team" : "Workspace"}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
 
       {tab === "api" && <ApiKeysTab />}
       {tab === "team" && <TeamTab />}
+      {tab === "import" && <ImportTab />}
       {tab === "workspace" && <WorkspaceTab />}
     </div>
   );
@@ -262,6 +270,280 @@ function TeamTab() {
         ) : null}
         {sending ? "Sending..." : "Send Invite"}
       </button>
+    </div>
+  );
+}
+
+type Row = Record<string, string>;
+type RowResult = { row: number; status: "ok" | "failed"; reason?: string };
+
+function parseCsv(text: string): Row[] {
+  const rows: string[][] = [];
+  let field = "";
+  let row: string[] = [];
+  let inQuotes = false;
+  const flushField = () => {
+    row.push(field);
+    field = "";
+  };
+  const flushRow = () => {
+    rows.push(row);
+    row = [];
+  };
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inQuotes) {
+      if (char === '"' && text[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = true;
+    } else if (char === ",") {
+      flushField();
+    } else if (char === "\n") {
+      flushField();
+      flushRow();
+    } else if (char === "\r") {
+      // skip
+    } else {
+      field += char;
+    }
+  }
+  if (field.length || row.length) {
+    flushField();
+    flushRow();
+  }
+  const nonEmpty = rows.filter((entry) => entry.some((cell) => cell.trim().length));
+  if (nonEmpty.length === 0) return [];
+  const headers = nonEmpty[0].map((cell) => cell.trim());
+  return nonEmpty.slice(1).map((entry) => {
+    const record: Row = {};
+    headers.forEach((key, index) => {
+      record[key] = entry[index] != null ? entry[index].trim() : "";
+    });
+    return record;
+  });
+}
+
+function ImportTab() {
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <CallsImporter />
+      <SignalsImporter />
+    </div>
+  );
+}
+
+function CallsImporter() {
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [results, setResults] = useState<RowResult[]>([]);
+  const [message, setMessage] = useState("");
+
+  async function handleFile(file: File) {
+    setBusy(true);
+    setResults([]);
+    setMessage("");
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text);
+      if (rows.length === 0) {
+        setMessage("CSV had no data rows.");
+        return;
+      }
+      setProgress({ done: 0, total: rows.length });
+      const collected: RowResult[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row.transcript) {
+          collected.push({ row: i + 1, status: "failed", reason: "Missing transcript." });
+          setProgress({ done: i + 1, total: rows.length });
+          continue;
+        }
+        try {
+          const res = await fetch("/api/transcripts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              account: row.account || "",
+              contact: row.contact || "",
+              prospectRole: row.prospectRole || "",
+              companySize: row.companySize || "",
+              callDate: row.callDate || row.date || new Date().toISOString().slice(0, 10),
+              callOutcome: row.callOutcome || "unclear",
+              transcript: row.transcript,
+            }),
+          });
+          const json = await res.json();
+          if (res.ok && json.ok) {
+            collected.push({ row: i + 1, status: "ok" });
+          } else {
+            collected.push({
+              row: i + 1,
+              status: "failed",
+              reason: json.error || `HTTP ${res.status}`,
+            });
+          }
+        } catch (err) {
+          collected.push({
+            row: i + 1,
+            status: "failed",
+            reason: err instanceof Error ? err.message : "Network error",
+          });
+        }
+        setProgress({ done: i + 1, total: rows.length });
+        setResults([...collected]);
+      }
+      const ok = collected.filter((r) => r.status === "ok").length;
+      setMessage(`Bulk calls upload: ${ok} saved, ${collected.length - ok} skipped.`);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not read CSV.");
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  return (
+    <div className="glass-card p-6 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold mb-1">Bulk upload calls</h3>
+        <p className="text-xs text-[var(--color-atib-text-dim)]">
+          Each row runs through the SOAP pipeline. Expect a few seconds per call.
+        </p>
+        <p className="text-[10px] text-[var(--color-atib-text-dim)] mt-2 font-mono">
+          Headers: account, contact, callDate, callOutcome, transcript
+        </p>
+      </div>
+      <label className="btn-primary inline-flex items-center gap-2 cursor-pointer w-fit">
+        {busy ? (
+          <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        ) : null}
+        {busy ? `Uploading ${progress?.done ?? 0}/${progress?.total ?? 0}...` : "Bulk upload CSV"}
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          className="hidden"
+          disabled={busy}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              handleFile(file);
+            }
+            e.target.value = "";
+          }}
+        />
+      </label>
+      {message ? (
+        <div className="p-3 rounded-lg text-sm bg-[var(--color-atib-surface)]/50 text-[var(--color-atib-text-muted)]">
+          {message}
+        </div>
+      ) : null}
+      {results.length > 0 ? (
+        <div className="max-h-48 overflow-y-auto text-xs font-mono space-y-1">
+          {results.map((r) => (
+            <div
+              key={r.row}
+              className={r.status === "ok" ? "text-emerald-400" : "text-red-400"}
+            >
+              Row {r.row}: {r.status === "ok" ? "saved" : `failed — ${r.reason}`}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SignalsImporter() {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [errors, setErrors] = useState<{ row: number; reason: string }[]>([]);
+
+  async function handleFile(file: File) {
+    setBusy(true);
+    setMessage("");
+    setErrors([]);
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text);
+      if (rows.length === 0) {
+        setMessage("CSV had no data rows.");
+        return;
+      }
+      const res = await fetch("/api/signals/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: rows }),
+      });
+      const json = await res.json();
+      if (res.ok && json.ok) {
+        setMessage(json.message || `Inserted ${json.inserted} signals.`);
+        setErrors(json.errors || []);
+      } else {
+        setMessage(json.error || `Upload failed (HTTP ${res.status}).`);
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not read CSV.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="glass-card p-6 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold mb-1">Bulk upload signals</h3>
+        <p className="text-xs text-[var(--color-atib-text-dim)]">
+          Seeds the signal bank directly. Use this to import a baseline of approved findings.
+        </p>
+        <p className="text-[10px] text-[var(--color-atib-text-dim)] mt-2 font-mono">
+          Headers: title, content, signalType, tier, polarity, strategicImportance, pillarTag, verbatimQuote, competitorName
+        </p>
+        <p className="text-[10px] text-[var(--color-atib-text-dim)] mt-1">
+          signalType must be one of: objection, language_pattern, competitor_mention, use_case, ICP_signal, pricing_signal, feature_request, buying_trigger, churn_risk, expansion_signal.
+        </p>
+      </div>
+      <label className="btn-primary inline-flex items-center gap-2 cursor-pointer w-fit">
+        {busy ? (
+          <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        ) : null}
+        {busy ? "Uploading..." : "Bulk upload CSV"}
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          className="hidden"
+          disabled={busy}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              handleFile(file);
+            }
+            e.target.value = "";
+          }}
+        />
+      </label>
+      {message ? (
+        <div className="p-3 rounded-lg text-sm bg-[var(--color-atib-surface)]/50 text-[var(--color-atib-text-muted)]">
+          {message}
+        </div>
+      ) : null}
+      {errors.length > 0 ? (
+        <div className="max-h-48 overflow-y-auto text-xs font-mono space-y-1">
+          {errors.map((e) => (
+            <div key={e.row} className="text-red-400">
+              Row {e.row}: {e.reason}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

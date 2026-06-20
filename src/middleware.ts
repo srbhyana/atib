@@ -44,6 +44,17 @@ export function middleware(request: NextRequest) {
 
   // Allow public routes (no redirect, no auth check)
   if (PUBLIC_ROUTES.some((route) => pathname.startsWith(route))) {
+    // On the login and accept-invite pages, proactively clear any stale
+    // session cookie. Server Components can't mutate cookies, so a stale
+    // token that fails DB validation would otherwise survive the redirect
+    // back here and cause an infinite middleware → page → middleware loop.
+    // Skipped for API auth routes so POST /api/auth/login can set the cookie.
+    const isAuthPage = pathname === "/login" || pathname.startsWith("/accept-invite");
+    if (isAuthPage && request.cookies.get(SESSION_COOKIE)?.value) {
+      const response = NextResponse.next();
+      response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
+      return response;
+    }
     return NextResponse.next();
   }
 
@@ -55,7 +66,7 @@ export function middleware(request: NextRequest) {
     loginUrl.searchParams.set("from", pathname);
     const response = NextResponse.redirect(loginUrl);
     // Ensure the cookie is fully cleared so the browser doesn't loop
-    response.cookies.delete(SESSION_COOKIE);
+    response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
     return response;
   }
 
