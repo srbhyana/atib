@@ -9,6 +9,11 @@ import type { NextRequest } from "next/server";
  * the presence of the session cookie and redirect to /login if missing.
  *
  * Full auth is enforced in the server components via getSession().
+ *
+ * IMPORTANT: When redirecting to /login, we delete the session cookie on the
+ * response so the browser doesn't keep sending a stale cookie, which would
+ * cause getSession() to return null → server component redirects to /login →
+ * middleware sees cookie → passes through → infinite redirect loop.
  */
 
 const PUBLIC_ROUTES = [
@@ -23,13 +28,10 @@ const PUBLIC_ROUTES = [
   "/api/inngest",
 ];
 
+const SESSION_COOKIE = "atib_session";
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-
-  // Allow public routes
-  if (PUBLIC_ROUTES.some((route) => pathname.startsWith(route))) {
-    return NextResponse.next();
-  }
 
   // Allow static files and Next.js internals
   if (
@@ -40,13 +42,21 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Allow public routes (no redirect, no auth check)
+  if (PUBLIC_ROUTES.some((route) => pathname.startsWith(route))) {
+    return NextResponse.next();
+  }
+
   // Check for session cookie
-  const sessionCookie = request.cookies.get("atib_session");
+  const sessionCookie = request.cookies.get(SESSION_COOKIE);
 
   if (!sessionCookie?.value) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("from", pathname);
-    return NextResponse.redirect(loginUrl);
+    const response = NextResponse.redirect(loginUrl);
+    // Ensure the cookie is fully cleared so the browser doesn't loop
+    response.cookies.delete(SESSION_COOKIE);
+    return response;
   }
 
   return NextResponse.next();

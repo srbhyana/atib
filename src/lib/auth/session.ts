@@ -48,7 +48,13 @@ export async function getSession(): Promise<SessionUser | null> {
       )
       .limit(1);
 
-    if (result.length === 0) return null;
+    if (result.length === 0) {
+      // Cookie is present but session is invalid/expired — clear it so the
+      // middleware can redirect cleanly on the next request instead of
+      // passing through and causing a server-component → /login redirect loop.
+      try { cookieStore.delete(SESSION_COOKIE); } catch { /* edge/readonly context */ }
+      return null;
+    }
 
     const row = result[0];
     return {
@@ -59,6 +65,11 @@ export async function getSession(): Promise<SessionUser | null> {
       workspaceId: row.workspaceId,
     };
   } catch {
+    // DB error — clear the cookie to avoid infinite loops
+    try {
+      const cookieStore = await cookies();
+      cookieStore.delete(SESSION_COOKIE);
+    } catch { /* edge/readonly context */ }
     return null;
   }
 }
