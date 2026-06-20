@@ -332,6 +332,25 @@ function parseCsv(text: string): Row[] {
   });
 }
 
+// The DB enum for call_outcome only allows 4 values. CSVs in the wild
+// carry richer prose ("WON · 412-station rollout", "STALLED · 3-week
+// security review"), so map the leading keyword down to the enum. Anything
+// unrecognised lands on "unclear" — safe default, lets the row land.
+function normalizeCallOutcome(raw: string | undefined): "progressed" | "stalled" | "lost" | "unclear" {
+  const v = String(raw || "").trim().toLowerCase();
+  if (!v) return "unclear";
+  if (v.startsWith("won") || v.startsWith("progressed") || v.startsWith("advanced") || v.startsWith("signed")) {
+    return "progressed";
+  }
+  if (v.startsWith("stalled") || v.startsWith("paused") || v.startsWith("blocked")) {
+    return "stalled";
+  }
+  if (v.startsWith("lost") || v.startsWith("dead") || v.startsWith("closed-lost")) {
+    return "lost";
+  }
+  return "unclear";
+}
+
 function ImportTab() {
   return (
     <div className="space-y-6 max-w-2xl">
@@ -377,7 +396,7 @@ function CallsImporter() {
               prospectRole: row.prospectRole || "",
               companySize: row.companySize || "",
               callDate: row.callDate || row.date || new Date().toISOString().slice(0, 10),
-              callOutcome: row.callOutcome || "unclear",
+              callOutcome: normalizeCallOutcome(row.callOutcome),
               transcript: row.transcript,
             }),
           });
