@@ -50,9 +50,13 @@ export function middleware(request: NextRequest) {
     // back here and cause an infinite middleware → page → middleware loop.
     // Skipped for API auth routes so POST /api/auth/login can set the cookie.
     const isAuthPage = pathname === "/login" || pathname.startsWith("/accept-invite");
-    if (isAuthPage && request.cookies.get(SESSION_COOKIE)?.value) {
+    if (isAuthPage) {
       const response = NextResponse.next();
-      response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
+      // Stop edge/CDN caching so middleware runs on every request.
+      response.headers.set("Cache-Control", "no-store, must-revalidate");
+      if (request.cookies.get(SESSION_COOKIE)?.value) {
+        response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
+      }
       return response;
     }
     return NextResponse.next();

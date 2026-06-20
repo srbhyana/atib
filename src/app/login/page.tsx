@@ -3,6 +3,12 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+// Force dynamic so middleware runs on every request and nothing gets
+// edge-cached. Without this, Next prerenders /login as static and Railway's
+// edge serves it for s-maxage=31536000 — middleware never runs, the
+// stale-cookie clearing never fires, and the redirect loop comes back.
+export const dynamic = "force-dynamic";
+
 export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<"login" | "signup">("login");
