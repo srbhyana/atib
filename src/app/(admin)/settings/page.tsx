@@ -354,8 +354,75 @@ function normalizeCallOutcome(raw: string | undefined): "progressed" | "stalled"
 function ImportTab() {
   return (
     <div className="space-y-6 max-w-2xl">
+      <DemoSeed />
       <CallsImporter />
       <SignalsImporter />
+    </div>
+  );
+}
+
+function DemoSeed() {
+  const [busy, setBusy] = useState<"refive" | "flowace" | null>(null);
+  const [message, setMessage] = useState("");
+
+  async function seed(preset: "refive" | "flowace") {
+    setBusy(preset);
+    setMessage("");
+    try {
+      const res = await fetch("/api/setup/seed-demo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset }),
+      });
+      const json = await res.json();
+      if (res.ok && json.ok) {
+        setMessage(json.message || "Canonical context seeded.");
+      } else {
+        setMessage(json.error || `Seed failed (HTTP ${res.status}).`);
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="glass-card p-6 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold mb-1">Seed canonical context</h3>
+        <p className="text-xs text-[var(--color-atib-text-dim)]">
+          Replaces your workspace&apos;s positioning, pillars, ICP, and competitors with a demo preset.
+          Run this before uploading the matching calls CSV so the dashboard&apos;s pillar lights align.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        <button
+          onClick={() => seed("refive")}
+          disabled={busy !== null}
+          className="btn-primary inline-flex items-center gap-2"
+        >
+          {busy === "refive" ? (
+            <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : null}
+          {busy === "refive" ? "Seeding..." : "Use Refive preset"}
+        </button>
+        <button
+          onClick={() => seed("flowace")}
+          disabled={busy !== null}
+          className="btn-secondary inline-flex items-center gap-2"
+        >
+          {busy === "flowace" ? (
+            <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : null}
+          {busy === "flowace" ? "Seeding..." : "Use Flowace preset"}
+        </button>
+      </div>
+      {message ? (
+        <div className="p-3 rounded-lg text-sm bg-[var(--color-atib-surface)]/50 text-[var(--color-atib-text-muted)]">
+          {message}
+        </div>
+      ) : null}
     </div>
   );
 }

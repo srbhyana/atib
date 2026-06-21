@@ -3,8 +3,8 @@ export const dynamic = "force-dynamic";
 import { getSession } from "@/lib/auth/session";
 import { getCanonicalContext } from "@/lib/agents/canonical-context";
 import { db } from "@/lib/db/client";
-import { transcripts, signals } from "@/lib/db/schema";
-import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { transcripts, signals, autoAnswers } from "@/lib/db/schema";
+import { and, desc, eq, gte, inArray, notInArray, sql } from "drizzle-orm";
 import Link from "next/link";
 
 type Polarity = "Reinforces" | "Contradicts" | "Extends" | "Neutral";
@@ -16,11 +16,12 @@ export default async function DashboardPage() {
 
   const ctx = await getCanonicalContext(session.workspaceId);
   const data = await loadDashboardData(session.workspaceId);
-  const pillars = ctx?.pillars ?? ["Pillar 1", "Pillar 2", "Pillar 3"];
+  const pillars = ctx?.pillars ?? ["", "", ""];
+  const hasCanonical = pillars.some((p) => p && p.trim().length > 0);
 
   const drift = computeDriftScore(data.polarityTotals);
   const pillarScores = [1, 2, 3].map((idx) =>
-    computePillarScore(idx, pillars[idx - 1] || `Pillar ${idx}`, data.polarityByPillar)
+    computePillarScore(idx, pillars[idx - 1] || `Pillar ${idx} — not set`, data.polarityByPillar)
   );
 
   return (
@@ -38,16 +39,31 @@ export default async function DashboardPage() {
       <DriftHero score={drift.score} reinforces={data.polarityTotals.reinforces}
                  contradicts={data.polarityTotals.contradicts} total={data.activeSignalCount} />
 
+      {!hasCanonical ? (
+        <div className="glass-card p-4 border border-amber-500/30 bg-amber-500/[0.04]">
+          <p className="text-sm text-amber-300">
+            Canonical context isn&apos;t set yet — pillar lights, ICP, and competitor surfaces stay empty until it is.
+          </p>
+          <p className="mt-1 text-xs text-[var(--color-atib-text-dim)]">
+            Fastest path:{" "}
+            <Link href="/settings" className="underline">Settings → Import</Link>
+            {" "}→ Seed canonical context (Refive or Flowace preset).
+          </p>
+        </div>
+      ) : null}
+
       <PillarLights pillars={pillarScores} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <IcpDistribution counts={data.icpBuckets} total={data.icpTotal} />
+        <IcpDistribution counts={data.icpBuckets} total={data.icpTotal} trend={data.icpTrend} />
         <BlockerDistribution counts={data.blockerBuckets} total={data.blockerTotal} />
       </div>
 
       <TopSignalsTable rows={data.topSignals} />
 
       <ContestedQueue signals={data.contestedSignals} callCount={data.callCount} />
+
+      <AutoAnswersQueue rows={data.autoAnswers} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <CompetitorMentions rows={data.competitorRows} />
@@ -75,12 +91,16 @@ export default async function DashboardPage() {
 
 async function loadDashboardData(workspaceId: string) {
   const activeTier = sql`tier NOT IN ('archived', 'dismissed')`;
+  const now = new Date();
+  const last30Cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const prior30Cutoff = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
 
   const [
     callStats,
     polarityTotalsRow,
     polarityByPillarRows,
     icpRows,
+    icpTrendRows,
     tierCounts,
     topSignals,
     contestedRows,
@@ -88,6 +108,7 @@ async function loadDashboardData(workspaceId: string) {
     benefitRows,
     objectionRows,
     enablementRows,
+    autoAnswerRows,
   ] = await Promise.all([
     db
       .select({
@@ -126,6 +147,23 @@ async function loadDashboardData(workspaceId: string) {
       .from(signals)
       .where(and(eq(signals.workspaceId, workspaceId), activeTier, eq(signals.signalType, "ICP_signal")))
       .groupBy(signals.polarity),
+    // ICP trend — last 30 days vs prior 30, so we can compute the drift delta the spec calls for.
+    db
+      .select({
+        window: sql<"current" | "prior">`case when ${signals.firstSeen} >= ${last30Cutoff} then 'current' else 'prior' end`,
+        polarity: signals.polarity,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          activeTier,
+          eq(signals.signalType, "ICP_signal"),
+          gte(signals.firstSeen, prior30Cutoff)
+        )
+      )
+      .groupBy(sql`1`, signals.polarity),
     db
       .select({
         tier: signals.tier,
@@ -148,7 +186,7 @@ async function loadDashboardData(workspaceId: string) {
       .from(signals)
       .where(and(eq(signals.workspaceId, workspaceId), notInArray(signals.tier, ["archived", "dismissed"])))
       .orderBy(desc(signals.reinforcementCount), desc(signals.lastReinforced))
-      .limit(8),
+      .limit(5),
     db
       .select({
         id: signals.id,
@@ -235,6 +273,24 @@ async function loadDashboardData(workspaceId: string) {
       )
       .orderBy(desc(signals.reinforcementCount), desc(signals.lastReinforced))
       .limit(6),
+    // Auto-Answers Queue (Spec Module 4). Repeat questions worth a canonical answer.
+    db
+      .select({
+        id: autoAnswers.id,
+        question: autoAnswers.question,
+        draftedAnswer: autoAnswers.draftedAnswer,
+        frequency: autoAnswers.frequency,
+        state: autoAnswers.state,
+      })
+      .from(autoAnswers)
+      .where(
+        and(
+          eq(autoAnswers.workspaceId, workspaceId),
+          notInArray(autoAnswers.state, ["dismissed", "approved"])
+        )
+      )
+      .orderBy(desc(autoAnswers.frequency))
+      .limit(5),
   ]);
 
   const polarityTotals = polarityTotalsRow[0] || {
@@ -246,6 +302,20 @@ async function loadDashboardData(workspaceId: string) {
 
   const icpBuckets = bucketIcp(icpRows);
   const icpTotal = sumBucket(icpBuckets);
+
+  // Compute ICP drift delta: Core share in last 30 days vs prior 30.
+  const currentRows = icpTrendRows.filter((r) => r.window === "current");
+  const priorRows = icpTrendRows.filter((r) => r.window === "prior");
+  const currentBuckets = bucketIcp(currentRows);
+  const priorBuckets = bucketIcp(priorRows);
+  const currentTotal = sumBucket(currentBuckets);
+  const priorTotal = sumBucket(priorBuckets);
+  const icpTrend = {
+    currentCorePct: currentTotal === 0 ? null : Math.round((currentBuckets.Core / currentTotal) * 100),
+    priorCorePct: priorTotal === 0 ? null : Math.round((priorBuckets.Core / priorTotal) * 100),
+    currentTotal,
+    priorTotal,
+  };
 
   const { buckets: blockerBuckets, total: blockerTotal } = bucketBlockers(
     objectionRows,
@@ -276,6 +346,8 @@ async function loadDashboardData(workspaceId: string) {
     blockerBuckets,
     blockerTotal,
     enablementSignals: enablementRows,
+    autoAnswers: autoAnswerRows,
+    icpTrend,
   };
 }
 
@@ -394,19 +466,24 @@ function fmtDate(d: Date | string | null) {
 function SectionShell({
   title,
   hint,
+  action,
   children,
 }: {
   title: string;
   hint?: string;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <section className="space-y-3">
-      <div>
-        <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-[var(--color-atib-text-muted)]">
-          {title}
-        </h2>
-        {hint ? <p className="text-xs text-[var(--color-atib-text-dim)] mt-1">{hint}</p> : null}
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-[var(--color-atib-text-muted)]">
+            {title}
+          </h2>
+          {hint ? <p className="text-xs text-[var(--color-atib-text-dim)] mt-1">{hint}</p> : null}
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
       </div>
       {children}
     </section>
@@ -526,16 +603,89 @@ function HorizontalBars({
 }
 
 function IcpDistribution({
-  counts, total,
-}: { counts: Record<string, number>; total: number }) {
+  counts, total, trend,
+}: {
+  counts: Record<string, number>;
+  total: number;
+  trend: { currentCorePct: number | null; priorCorePct: number | null; currentTotal: number; priorTotal: number };
+}) {
   const rows = (["Core", "Adjacent", "Outside", "Unclear"] as const).map((label) => ({
     label, count: counts[label] ?? 0,
   }));
+  // ICP drift alert: only show when both windows have data and there's a meaningful delta.
+  let alert: { tone: "danger" | "warn" | "ok"; text: string } | null = null;
+  if (trend.currentCorePct !== null && trend.priorCorePct !== null && trend.currentTotal >= 3 && trend.priorTotal >= 3) {
+    const delta = trend.currentCorePct - trend.priorCorePct;
+    if (delta <= -10) {
+      alert = { tone: "danger", text: `ICP drift detected. ${trend.currentCorePct}% of recent ICP signals are Core, vs. ${trend.priorCorePct}% prior period.` };
+    } else if (delta >= 10) {
+      alert = { tone: "ok", text: `ICP fit improving. Core share rose from ${trend.priorCorePct}% to ${trend.currentCorePct}% vs prior period.` };
+    } else {
+      alert = { tone: "warn", text: `ICP fit stable. ${trend.currentCorePct}% Core this window, ${trend.priorCorePct}% prior.` };
+    }
+  }
   return (
     <SectionShell title="ICP Fit Distribution" hint="Derived from ICP signals tagged in transcripts">
-      <div className="glass-card p-5">
+      <div className="glass-card p-5 space-y-4">
         <HorizontalBars rows={rows} total={total} emptyLabel="No ICP signals captured yet." />
+        {alert ? (
+          <p className={
+            alert.tone === "danger" ? "text-xs text-rose-400"
+            : alert.tone === "ok" ? "text-xs text-emerald-400"
+            : "text-xs text-[var(--color-atib-text-dim)]"
+          }>
+            {alert.text}
+          </p>
+        ) : null}
       </div>
+    </SectionShell>
+  );
+}
+
+function AutoAnswersQueue({
+  rows,
+}: {
+  rows: Array<{ id: string; question: string; draftedAnswer: string; frequency: number; state: string }>;
+}) {
+  return (
+    <SectionShell title="Auto-Answers Queue" hint="Questions repeating across calls — candidates for canonical answers">
+      {rows.length === 0 ? (
+        <div className="glass-card p-5">
+          <p className="text-xs text-[var(--color-atib-text-dim)]">
+            Surfaces once the same question shows up across 3+ calls. Re-process transcripts to refresh.
+          </p>
+        </div>
+      ) : (
+        <div className="glass-card overflow-hidden">
+          <ul className="divide-y divide-white/5">
+            {rows.map((r) => (
+              <li key={r.id} className="px-5 py-4 flex items-start gap-4">
+                <span className="shrink-0 inline-flex items-center justify-center min-w-[2.5rem] h-7 px-2 rounded-full text-xs tabular-nums bg-[var(--color-atib-accent)]/15 text-[var(--color-atib-accent)] border border-[var(--color-atib-accent)]/30">
+                  ×{r.frequency}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-[var(--color-atib-text)]">{r.question}</p>
+                  {r.draftedAnswer ? (
+                    <p className="mt-1 text-xs text-[var(--color-atib-text-dim)] line-clamp-2">
+                      Draft answer: {r.draftedAnswer}
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-xs text-[var(--color-atib-text-dim)] italic">
+                      No draft answer yet.
+                    </p>
+                  )}
+                </div>
+                <Link
+                  href="/auto-answers"
+                  className="shrink-0 text-xs underline underline-offset-2 text-[var(--color-atib-text-dim)] hover:text-[var(--color-atib-text)]"
+                >
+                  Review →
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </SectionShell>
   );
 }
@@ -577,7 +727,11 @@ function TopSignalsTable({
   }>;
 }) {
   return (
-    <SectionShell title="Top Recurring Signals" hint="Highest reinforcement count, freshest first">
+    <SectionShell
+      title="Top Recurring Signals"
+      hint="Top 5 by reinforcement count and recency"
+      action={<Link href="/signals" className="text-xs underline underline-offset-2 text-[var(--color-atib-text-dim)] hover:text-[var(--color-atib-text)]">View all →</Link>}
+    >
       <div className="glass-card overflow-x-auto">
         <table className="w-full text-xs">
           <thead className="text-left text-[10px] uppercase tracking-[0.12em] text-[var(--color-atib-text-dim)] border-b border-white/5">
