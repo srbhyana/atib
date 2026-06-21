@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireRole } from "@/lib/auth/session";
 import { db } from "@/lib/db/client";
-import { signals, competitors } from "@/lib/db/schema";
+import { signals, competitors, canonicalContext } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 
 const SIGNAL_TYPES = new Set([
@@ -16,8 +16,6 @@ const SIGNAL_TYPES = new Set([
   "churn_risk",
   "expansion_signal",
 ]);
-const POLARITY = new Set(["Reinforces", "Contradicts", "Extends", "Neutral"]);
-const IMPORTANCE = new Set(["Low", "Medium", "High", "Critical"]);
 const TIERS = new Set([
   "suggestion",
   "evolving",
@@ -26,6 +24,54 @@ const TIERS = new Set([
   "archived",
   "dismissed",
 ]);
+
+function normalizePolarity(raw: string): "Reinforces" | "Contradicts" | "Extends" | "Neutral" {
+  const v = raw.trim().toLowerCase();
+  if (v === "reinforces" || v === "positive" || v === "+") return "Reinforces";
+  if (v === "contradicts" || v === "negative" || v === "-") return "Contradicts";
+  if (v === "extends" || v === "neutral-positive") return "Extends";
+  return "Neutral";
+}
+
+function normalizeImportance(raw: string): "Low" | "Medium" | "High" | "Critical" {
+  const v = raw.trim().toLowerCase();
+  if (v === "critical") return "Critical";
+  if (v === "high") return "High";
+  if (v === "low") return "Low";
+  return "Medium";
+}
+
+function normalizeTier(raw: string): "suggestion" | "evolving" | "contested" | "concrete" | "archived" | "dismissed" {
+  const v = raw.trim().toLowerCase();
+  if (TIERS.has(v)) return v as "suggestion" | "evolving" | "contested" | "concrete" | "archived" | "dismissed";
+  return "suggestion";
+}
+
+// CSV pillarTag values are usually descriptive strings like "pillar_identification".
+// We match each label against the workspace's three canonical pillars by keyword
+// overlap so the dashboard's pillar traffic lights have something to count.
+function inferPillarTag(raw: string, pillarTexts: string[]): number {
+  if (!raw) return 0;
+  const v = raw.trim().toLowerCase().replace(/^pillar[_\s-]*/, "");
+  if (/^[123]$/.test(v)) return Number(v);
+  if (!v) return 0;
+  const tokens = v.split(/[\s_\-/]+/).filter(Boolean);
+  let bestPillar = 0;
+  let bestScore = 0;
+  for (let i = 0; i < pillarTexts.length; i++) {
+    const pillar = (pillarTexts[i] || "").toLowerCase();
+    if (!pillar) continue;
+    let score = 0;
+    for (const token of tokens) {
+      if (token.length >= 3 && pillar.includes(token)) score += 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestPillar = i + 1;
+    }
+  }
+  return bestPillar;
+}
 
 type SignalType =
   | "objection"
@@ -38,16 +84,6 @@ type SignalType =
   | "buying_trigger"
   | "churn_risk"
   | "expansion_signal";
-
-type Polarity = "Reinforces" | "Contradicts" | "Extends" | "Neutral";
-type Importance = "Low" | "Medium" | "High" | "Critical";
-type Tier =
-  | "suggestion"
-  | "evolving"
-  | "contested"
-  | "concrete"
-  | "archived"
-  | "dismissed";
 
 export async function POST(request: Request) {
   try {
@@ -62,11 +98,14 @@ export async function POST(request: Request) {
       );
     }
 
-    const comps = await db
-      .select()
-      .from(competitors)
-      .where(eq(competitors.workspaceId, session.workspaceId));
+    const [comps, ctxRow] = await Promise.all([
+      db.select().from(competitors).where(eq(competitors.workspaceId, session.workspaceId)),
+      db.select().from(canonicalContext).where(eq(canonicalContext.workspaceId, session.workspaceId)).limit(1),
+    ]);
     const compMap = new Map(comps.map((c) => [c.name.toLowerCase(), c.id]));
+    const pillarTexts = ctxRow[0]
+      ? [ctxRow[0].pillar1, ctxRow[0].pillar2, ctxRow[0].pillar3]
+      : ["", "", ""];
 
     const errors: { row: number; reason: string }[] = [];
     const valid: Array<typeof signals.$inferInsert> = [];
@@ -88,12 +127,10 @@ export async function POST(request: Request) {
         return;
       }
 
-      const tier = String(row.tier || row.state || "suggestion").trim();
-      const polarity = String(row.polarity || "Neutral").trim();
-      const importance = String(
-        row.strategicImportance || row.importance || "Medium"
-      ).trim();
-      const pillarRaw = Number(row.pillarTag ?? row.pillar ?? 0);
+      const tier = normalizeTier(String(row.tier || row.state || ""));
+      const polarity = normalizePolarity(String(row.polarity || ""));
+      const importance = normalizeImportance(String(row.strategicImportance || row.importance || ""));
+      const pillarTag = inferPillarTag(String(row.pillarTag ?? row.pillar ?? ""), pillarTexts);
       const competitorName = String(row.competitorName || "").trim();
 
       valid.push({
@@ -103,12 +140,10 @@ export async function POST(request: Request) {
         content,
         verbatimQuote: String(row.verbatimQuote || row.quote || "").trim(),
         inferredMeaning: String(row.inferredMeaning || content).trim(),
-        pillarTag: Number.isFinite(pillarRaw) ? pillarRaw : 0,
-        polarity: (POLARITY.has(polarity) ? polarity : "Neutral") as Polarity,
-        strategicImportance: (IMPORTANCE.has(importance)
-          ? importance
-          : "Medium") as Importance,
-        tier: (TIERS.has(tier) ? tier : "suggestion") as Tier,
+        pillarTag,
+        polarity,
+        strategicImportance: importance,
+        tier,
         competitorTagged: competitorName
           ? compMap.get(competitorName.toLowerCase()) || null
           : null,
