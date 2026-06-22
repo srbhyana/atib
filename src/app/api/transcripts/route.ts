@@ -81,7 +81,10 @@ export async function POST(request: Request) {
       }
     );
 
-    // 4. Store SOAP note
+    // 4. Store SOAP note — persist the full analysis blob (v3.1).
+    //    Every column below feeds at least one dashboard / framework module.
+    //    See thesis §25 for the field contract.
+    const a = soapResult.analysis;
     const [soapNote] = await db
       .insert(soapNotes)
       .values({
@@ -92,19 +95,43 @@ export async function POST(request: Request) {
         assessment: soapResult.soap.assessment,
         plan: soapResult.soap.plan,
         confidence: soapResult.soap.confidence,
-        qualityWarning: soapResult.analysis.qualityWarning || "",
+        qualityWarning: a.qualityWarning || "",
         llmModel: soapResult.source === "llm" ? "claude-sonnet-4-6" : "heuristic",
         llmSource: soapResult.source === "llm" ? "llm" : "heuristic",
-        promptVersion: "v3.0",
+        promptVersion: "v3.1",
+        callType: a.callType || "sales",
+        icpVerdict: a.icpVerdict || "",
+        blockerType: a.blockerType || "",
+        buyingStage: a.buyingStage || "",
+        needGap: a.needGap || "",
+        resonanceLayer: a.resonanceLayer || "",
+        terminalBenefit: a.terminalBenefit || "",
+        reasonToBelieve: a.reasonToBelieve || "",
+        marketEnemy: a.marketEnemy || "",
+        buyingTrigger: a.buyingTrigger || "",
+        useCase: a.useCase || "",
+        kindergartenSummary: a.kindergartenSummary || "",
+        driftScore: typeof a.driftScore === "number" ? a.driftScore : 50,
+        popPodMovement: a.popPodMovement || "",
+        fiveCFailures: Array.isArray(a.fiveCFailures) ? a.fiveCFailures : [],
+        championStrength: a.championStrength || "",
+        hiddenStakeholders: Array.isArray(a.hiddenStakeholders) ? a.hiddenStakeholders : [],
+        personaTagged: a.personaTagged || "",
+        segmentTagged: a.segmentTagged || "",
       })
       .returning();
 
-    // 5. Ingest signals
+    // 5. Ingest signals — denormalise the call-level persona/segment down to each signal
+    //    so signals.persona_tagged / segment_tagged carry meaningful values for filtering.
     await ingestSignals(
       session.workspaceId,
       transcript.id,
       soapNote.id,
-      soapResult.analysis.signals || []
+      soapResult.analysis.signals || [],
+      {
+        callLevelPersona: a.personaTagged || "",
+        callLevelSegment: a.segmentTagged || "",
+      }
     );
 
     // 6. Ingest questions into auto-answers

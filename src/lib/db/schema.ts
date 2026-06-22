@@ -275,7 +275,28 @@ export const soapNotes = pgTable("soap_notes", {
   qualityWarning: text("quality_warning").default("").notNull(),
   llmModel: text("llm_model").default("").notNull(),
   llmSource: llmSourceEnum("llm_source").default("heuristic").notNull(),
-  promptVersion: text("prompt_version").default("v3.0").notNull(),
+  promptVersion: text("prompt_version").default("v3.1").notNull(),
+  // The full SOAP analysis blob, denormalised so per-call dashboard queries
+  // don't need to re-run the LLM. Previously these were computed and dropped.
+  callType: text("call_type").default("sales").notNull(),
+  icpVerdict: text("icp_verdict").default("").notNull(),
+  blockerType: text("blocker_type").default("").notNull(),
+  buyingStage: text("buying_stage").default("").notNull(),
+  needGap: text("need_gap").default("").notNull(),
+  resonanceLayer: text("resonance_layer").default("").notNull(),
+  terminalBenefit: text("terminal_benefit").default("").notNull(),
+  reasonToBelieve: text("reason_to_believe").default("").notNull(),
+  marketEnemy: text("market_enemy").default("").notNull(),
+  buyingTrigger: text("buying_trigger").default("").notNull(),
+  useCase: text("use_case").default("").notNull(),
+  kindergartenSummary: text("kindergarten_summary").default("").notNull(),
+  driftScore: integer("drift_score").default(50).notNull(),
+  popPodMovement: text("pop_pod_movement").default("").notNull(),
+  fiveCFailures: jsonb("five_c_failures").default("[]"),
+  championStrength: text("champion_strength").default("").notNull(),
+  hiddenStakeholders: jsonb("hidden_stakeholders").default("[]"),
+  personaTagged: text("persona_tagged").default("").notNull(),
+  segmentTagged: text("segment_tagged").default("").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -311,11 +332,26 @@ export const signals = pgTable(
     contestedAgainst: uuid("contested_against").references(() => approvedSignals.id),
     route: text("route").default("signal_library").notNull(),
     sourceSection: text("source_section").default("").notNull(),
+    // v3.1 framework tags. Per-signal versions of the call-level analysis fields.
+    switchingForce: text("switching_force").default("").notNull(),       // push/pull/anxiety/habit/none
+    needscopeLayer: text("needscope_layer").default("").notNull(),       // rational/social/emotive/mixed
+    marketMaturityScore: integer("market_maturity_score").default(0).notNull(), // -100..+100 (×100 to keep int)
+    ladderFeature: text("ladder_feature").default("").notNull(),
+    ladderAdvantage: text("ladder_advantage").default("").notNull(),
+    ladderTerminalBenefit: text("ladder_terminal_benefit").default("").notNull(),
+    seniority: text("seniority").default("").notNull(),
+    industryTagged: text("industry_tagged").default("").notNull(),
+    needGap: text("need_gap").default("").notNull(),
+    confidenceScore: integer("confidence_score").default(50).notNull(),  // 0..100 (×100 to keep int)
+    promptVersion: text("prompt_version").default("v3.1").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     index("signals_workspace_tier_idx").on(table.workspaceId, table.tier),
     index("signals_workspace_type_idx").on(table.workspaceId, table.signalType),
+    index("signals_workspace_first_seen_idx").on(table.workspaceId, table.firstSeen),
+    index("signals_workspace_switching_force_idx").on(table.workspaceId, table.switchingForce),
+    index("signals_workspace_needscope_idx").on(table.workspaceId, table.needscopeLayer),
   ]
 );
 

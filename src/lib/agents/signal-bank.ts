@@ -14,13 +14,29 @@ import { inngest } from "@/lib/jobs/client";
  *          tier state machine wiring, contested resolution.
  */
 
+// Scale a float in [min, max] to an int in [min*scale, max*scale], clamping
+// out-of-range or non-numeric input to `fallback * scale` (or to the bound
+// closest to the input).
+function clampScaled(
+  value: unknown,
+  min: number,
+  max: number,
+  scale: number,
+  fallback = 0
+): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return Math.round(fallback * scale);
+  return Math.round(Math.max(min, Math.min(max, n)) * scale);
+}
+
 // ─── Ingest signals from a SOAP run ────────────────────────────────
 
 export async function ingestSignals(
   workspaceId: string,
   transcriptId: string,
   soapNoteId: string,
-  rawSignals: SignalOutput[]
+  rawSignals: SignalOutput[],
+  callContext: { callLevelPersona?: string; callLevelSegment?: string } = {}
 ): Promise<void> {
   if (!rawSignals || rawSignals.length === 0) return;
 
@@ -36,6 +52,17 @@ export async function ingestSignals(
     const competitorId = signal.competitorTagged
       ? compMap.get(signal.competitorTagged.toLowerCase()) || null
       : null;
+
+    // Persona/segment fallback: prefer per-signal LLM output when it eventually
+    // emits those fields; for now we denormalise from the call-level analysis.
+    const persona = callContext.callLevelPersona || "";
+    const segment = callContext.callLevelSegment || "";
+
+    // Scale the float framework scores to integers for storage.
+    // marketMaturityScore: -1.0..+1.0 → -100..+100
+    // confidenceScore: 0.0..1.0 → 0..100
+    const maturity = clampScaled(signal.marketMaturityScore, -1, 1, 100);
+    const confidence = clampScaled(signal.confidenceScore, 0, 1, 100, 50);
 
     const [inserted] = await db
       .insert(signals)
@@ -54,11 +81,23 @@ export async function ingestSignals(
         tier: (signal.state || "suggestion") as Tier,
         competitorTagged: competitorId,
         competitorName: signal.competitorTagged || "",
-        personaTagged: signal.sourceSection || "",
-        segmentTagged: "",
+        personaTagged: persona,
+        segmentTagged: segment,
         canonicalContradiction: signal.canonicalContradiction || "no",
         route: signal.route || "signal_library",
         sourceSection: signal.sourceSection || "",
+        // v3.1 framework tags
+        switchingForce: signal.switchingForce || "",
+        needscopeLayer: signal.needscopeLayer || "",
+        marketMaturityScore: maturity,
+        ladderFeature: signal.ladder?.feature || "",
+        ladderAdvantage: signal.ladder?.advantage || "",
+        ladderTerminalBenefit: signal.ladder?.terminalBenefit || "",
+        seniority: signal.seniority || "",
+        industryTagged: signal.industryTagged || "",
+        needGap: signal.needGap || "",
+        confidenceScore: confidence,
+        promptVersion: "v3.1",
       })
       .returning({ id: signals.id });
 

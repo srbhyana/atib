@@ -59,6 +59,15 @@ export interface SoapOutput {
   confidence: SoapConfidence;
 }
 
+export type SwitchingForce = "push" | "pull" | "anxiety" | "habit" | "none";
+export type NeedscopeLayer = "rational" | "social" | "emotive" | "mixed";
+
+export interface SignalLadder {
+  feature: string;
+  advantage: string;
+  terminalBenefit: string;
+}
+
 export interface SignalOutput {
   title: string;
   content: string;
@@ -74,6 +83,15 @@ export interface SignalOutput {
   route: string;
   sourceSection: string;
   competitorTagged: string;
+  // v3.1 framework tags — per-signal
+  switchingForce: SwitchingForce;
+  needscopeLayer: NeedscopeLayer;
+  marketMaturityScore: number;   // -1.0..+1.0
+  ladder: SignalLadder;
+  seniority: string;
+  industryTagged: string;
+  needGap: string;
+  confidenceScore: number;        // 0.0..1.0
 }
 
 export interface QuestionOutput {
@@ -111,6 +129,9 @@ export interface AnalysisOutput {
   matchedPillars: string[];
   popPodMovement: string;
   fiveCFailures: string[];
+  // v3.1 additions — call-level stakeholder intelligence
+  championStrength: "Strong" | "Medium" | "Weak" | "Absent" | "";
+  hiddenStakeholders: string[];
   signals: SignalOutput[];
   questions: QuestionOutput[];
 }

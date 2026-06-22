@@ -156,6 +156,15 @@ function buildHeuristicSoap(
       route: "competitor_radar",
       sourceSection: "objective",
       competitorTagged: mentionedCompetitors[0],
+      // v3.1 framework defaults (heuristic can't infer these reliably)
+      switchingForce: "none" as const,
+      needscopeLayer: "rational" as const,
+      marketMaturityScore: 0,
+      ladder: { feature: "", advantage: "", terminalBenefit: "" },
+      seniority: "",
+      industryTagged: "",
+      needGap: "",
+      confidenceScore: 0.3,
     });
   }
 
@@ -207,6 +216,8 @@ function buildHeuristicSoap(
     matchedPillars,
     popPodMovement: "",
     fiveCFailures: [],
+    championStrength: "",
+    hiddenStakeholders: [],
     signals: heuristicSignals,
     questions: [],
   };
