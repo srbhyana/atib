@@ -132,6 +132,12 @@ export async function POST(request: Request) {
       const importance = normalizeImportance(String(row.strategicImportance || row.importance || ""));
       const pillarTag = inferPillarTag(String(row.pillarTag ?? row.pillar ?? ""), pillarTexts);
       const competitorName = String(row.competitorName || "").trim();
+      // CSV "mentions" → reinforcement_count so bulk-imported signals can
+      // promote past Suggestion based on their prior frequency.
+      const mentionsRaw = Number(row.mentions ?? row.reinforcementCount ?? 1);
+      const reinforcementCount = Number.isFinite(mentionsRaw) && mentionsRaw > 0
+        ? Math.min(Math.floor(mentionsRaw), 1000)
+        : 1;
 
       valid.push({
         workspaceId: session.workspaceId,
@@ -153,21 +159,35 @@ export async function POST(request: Request) {
         canonicalContradiction: String(row.canonicalContradiction || "no").trim(),
         route: String(row.route || "signal_library").trim(),
         sourceSection: String(row.sourceSection || "bulk_import").trim(),
+        reinforcementCount,
       });
     });
 
     let inserted = 0;
+    let promoted = 0;
     if (valid.length > 0) {
       const result = await db.insert(signals).values(valid).returning({ id: signals.id });
       inserted = result.length;
+
+      // Run tier evaluation on every inserted signal. Bulk CSVs frequently land
+      // with mention counts >= 3, so this is where Suggestion → Evolving
+      // promotions actually fire for the demo dataset.
+      const { evaluateAndApplyTransitions } = await import("@/lib/agents/tier-runner");
+      const outcome = await evaluateAndApplyTransitions(
+        result.map((r) => r.id),
+        session.workspaceId,
+        session.id
+      );
+      promoted = outcome.promoted;
     }
 
     return NextResponse.json({
       ok: true,
       inserted,
+      promoted,
       skipped: errors.length,
       errors,
-      message: `Inserted ${inserted} signals. ${errors.length} rows skipped.`,
+      message: `Inserted ${inserted} signals. ${promoted} auto-promoted past Suggestion. ${errors.length} rows skipped.`,
     });
   } catch (error) {
     if (error instanceof Response) return error;

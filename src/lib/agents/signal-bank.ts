@@ -3,6 +3,7 @@ import { signals, competitors, approvedSignals, contestedResolutions } from "@/l
 import { eq, and, desc, sql } from "drizzle-orm";
 import type { SignalOutput, Tier, SignalType, Polarity, Importance } from "@/lib/utils/types";
 import { inngest } from "@/lib/jobs/client";
+import { evaluateAndApplyTransition } from "./tier-runner";
 
 /**
  * Signal Bank Agent — Phase 2.
@@ -109,6 +110,15 @@ export async function ingestSignals(
         });
       } catch (err) {
         console.warn("Inngest send failed (signal/created):", err);
+      }
+
+      // Tier transition: usually a no-op for a brand-new signal (count=1)
+      // unless the LLM emitted state='evolving' or reinforcementCount was
+      // pre-set on the row (bulk import path with high mention counts).
+      try {
+        await evaluateAndApplyTransition(inserted.id, workspaceId);
+      } catch (err) {
+        console.warn("Tier transition evaluation failed:", err);
       }
     }
   }
@@ -287,6 +297,14 @@ export async function deduplicateSignal(
         .update(signals)
         .set({ tier: "archived" })
         .where(eq(signals.id, signalId));
+
+      // Reinforcement may push the survivor across a tier threshold.
+      // This is where most Suggestion → Evolving promotions actually fire.
+      try {
+        await evaluateAndApplyTransition(candidate.id, workspaceId);
+      } catch (err) {
+        console.warn("Tier transition after dedup-reinforce failed:", err);
+      }
 
       return { action: "reinforced", matchedId: candidate.id };
     }
