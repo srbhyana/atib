@@ -3,19 +3,47 @@ export const dynamic = "force-dynamic";
 import { getSession } from "@/lib/auth/session";
 import { getCanonicalContext } from "@/lib/agents/canonical-context";
 import { db } from "@/lib/db/client";
-import { transcripts, signals, autoAnswers } from "@/lib/db/schema";
-import { and, desc, eq, gte, inArray, notInArray, sql } from "drizzle-orm";
+import { transcripts, signals, autoAnswers, soapNotes, approvedSignals, competitors } from "@/lib/db/schema";
+import { and, desc, eq, gte, inArray, notInArray, sql, asc } from "drizzle-orm";
 import Link from "next/link";
+import FilterBar, { type FilterValues } from "./_components/FilterBar";
 
 type Polarity = "Reinforces" | "Contradicts" | "Extends" | "Neutral";
 type Tier = "suggestion" | "evolving" | "contested" | "concrete" | "archived" | "dismissed";
 
-export default async function DashboardPage() {
+function parseFilters(sp: Record<string, string | string[] | undefined>): FilterValues {
+  const win = String(sp.window || "30");
+  const w: FilterValues["window"] = win === "7" || win === "90" || win === "all" ? win : "30";
+  const out = String(sp.outcome || "all");
+  const o: FilterValues["outcome"] =
+    out === "progressed" || out === "stalled" || out === "lost" ? out : "all";
+  return {
+    window: w,
+    competitor: String(sp.competitor || ""),
+    segment: String(sp.segment || ""),
+    outcome: o,
+  };
+}
+
+function windowCutoff(w: FilterValues["window"]): Date | null {
+  if (w === "all") return null;
+  const days = Number(w);
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+}
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const session = await getSession();
   if (!session) return null;
 
+  const sp = await searchParams;
+  const filters = parseFilters(sp);
+
   const ctx = await getCanonicalContext(session.workspaceId);
-  const data = await loadDashboardData(session.workspaceId);
+  const data = await loadDashboardData(session.workspaceId, filters);
   const pillars = ctx?.pillars ?? ["", "", ""];
   const hasCanonical = pillars.some((p) => p && p.trim().length > 0);
 
@@ -36,6 +64,16 @@ export default async function DashboardPage() {
         </p>
       </header>
 
+      <FilterBar
+        values={filters}
+        options={{
+          competitors: data.filterOptions.competitors,
+          segments: data.filterOptions.segments,
+        }}
+      />
+
+      <WhatChangedHero changes={data.whatChanged} window={filters.window} />
+
       <DriftHero score={drift.score} reinforces={data.polarityTotals.reinforces}
                  contradicts={data.polarityTotals.contradicts} total={data.activeSignalCount} />
 
@@ -55,18 +93,30 @@ export default async function DashboardPage() {
       <PillarLights pillars={pillarScores} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <IcpDistribution counts={data.icpBuckets} total={data.icpTotal} trend={data.icpTrend} />
-        <BlockerDistribution counts={data.blockerBuckets} total={data.blockerTotal} />
+        <IcpDistribution
+          buckets={data.icpFromVerdict.buckets}
+          total={data.icpFromVerdict.total}
+          winRates={data.icpFromVerdict.winRates}
+          trend={data.icpTrend}
+          fallbackBuckets={data.icpBuckets}
+          fallbackTotal={data.icpTotal}
+        />
+        <BlockerDistribution
+          buckets={data.blockerFromVerdict.buckets}
+          total={data.blockerFromVerdict.total}
+          fallbackBuckets={data.blockerBuckets}
+          fallbackTotal={data.blockerTotal}
+        />
       </div>
 
       <TopSignalsTable rows={data.topSignals} />
 
-      <ContestedQueue signals={data.contestedSignals} callCount={data.callCount} />
+      <ContestedQueue signals={data.contestedWithCanon} callCount={data.callCount} />
 
       <AutoAnswersQueue rows={data.autoAnswers} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <CompetitorMentions rows={data.competitorRows} />
+        <CompetitorIntel rows={data.competitorStats} />
         <TerminalBenefits rows={data.terminalBenefits} />
       </div>
 
@@ -89,11 +139,26 @@ export default async function DashboardPage() {
  * Data layer — every aggregation runs at the SQL layer and in parallel.
  * ────────────────────────────────────────────────────────────────────── */
 
-async function loadDashboardData(workspaceId: string) {
+async function loadDashboardData(workspaceId: string, filters: FilterValues) {
   const activeTier = sql`tier NOT IN ('archived', 'dismissed')`;
   const now = new Date();
+  const last7Cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const last30Cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const prior30Cutoff = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+  const windowStart = windowCutoff(filters.window);
+
+  // Compose filter clauses once, reuse across queries.
+  const signalWindowClause = windowStart ? gte(signals.firstSeen, windowStart) : sql`true`;
+  const callWindowClause = windowStart ? gte(transcripts.callDate, windowStart.toISOString().slice(0, 10)) : sql`true`;
+  const competitorClause = filters.competitor
+    ? sql`lower(${signals.competitorName}) = lower(${filters.competitor})`
+    : sql`true`;
+  const outcomeClause = filters.outcome !== "all"
+    ? eq(transcripts.callOutcome, filters.outcome)
+    : sql`true`;
+  const segmentClause = filters.segment
+    ? sql`lower(${soapNotes.segmentTagged}) = lower(${filters.segment})`
+    : sql`true`;
 
   const [
     callStats,
@@ -101,15 +166,351 @@ async function loadDashboardData(workspaceId: string) {
     polarityByPillarRows,
     icpRows,
     icpTrendRows,
+    icpFromVerdictRows,
+    blockerVerdictRows,
     tierCounts,
     topSignals,
     contestedRows,
     competitorRows,
+    competitorTrendRows,
+    competitorWinLossRows,
     benefitRows,
     objectionRows,
     enablementRows,
     autoAnswerRows,
+    newPainsCount,
+    newCompetitorsCount,
+    graduatedCount,
+    contestedCount,
+    distinctCompetitors,
+    distinctSegments,
   ] = await Promise.all([
+    db
+      .select({
+        total: sql<number>`count(*)::int`,
+        progressed: sql<number>`count(*) filter (where ${transcripts.callOutcome} = 'progressed')::int`,
+        stalled: sql<number>`count(*) filter (where ${transcripts.callOutcome} = 'stalled')::int`,
+        lost: sql<number>`count(*) filter (where ${transcripts.callOutcome} = 'lost')::int`,
+        unclear: sql<number>`count(*) filter (where ${transcripts.callOutcome} = 'unclear')::int`,
+      })
+      .from(transcripts)
+      .where(and(eq(transcripts.workspaceId, workspaceId), callWindowClause, outcomeClause)),
+    db
+      .select({
+        reinforces: sql<number>`count(*) filter (where ${signals.polarity} = 'Reinforces')::int`,
+        contradicts: sql<number>`count(*) filter (where ${signals.polarity} = 'Contradicts')::int`,
+        extends: sql<number>`count(*) filter (where ${signals.polarity} = 'Extends')::int`,
+        neutral: sql<number>`count(*) filter (where ${signals.polarity} = 'Neutral')::int`,
+        total: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(and(eq(signals.workspaceId, workspaceId), activeTier, signalWindowClause, competitorClause)),
+    db
+      .select({
+        pillarTag: signals.pillarTag,
+        reinforces: sql<number>`count(*) filter (where ${signals.polarity} = 'Reinforces')::int`,
+        contradicts: sql<number>`count(*) filter (where ${signals.polarity} = 'Contradicts')::int`,
+      })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        activeTier,
+        inArray(signals.pillarTag, [1, 2, 3]),
+        signalWindowClause,
+        competitorClause,
+      ))
+      .groupBy(signals.pillarTag),
+    db
+      .select({
+        polarity: signals.polarity,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        activeTier,
+        eq(signals.signalType, "ICP_signal"),
+        signalWindowClause,
+      ))
+      .groupBy(signals.polarity),
+    // ICP trend — last 30 days vs prior 30, so we can compute the drift delta the spec calls for.
+    db
+      .select({
+        window: sql<"current" | "prior">`case when ${signals.firstSeen} >= ${last30Cutoff} then 'current' else 'prior' end`,
+        polarity: signals.polarity,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          activeTier,
+          eq(signals.signalType, "ICP_signal"),
+          gte(signals.firstSeen, prior30Cutoff)
+        )
+      )
+      .groupBy(sql`1`, signals.polarity),
+    // NEW: ICP buckets from soap_notes.icp_verdict (v3.1 data) with win-rate per bucket
+    db
+      .select({
+        verdict: soapNotes.icpVerdict,
+        callCount: sql<number>`count(*)::int`,
+        progressed: sql<number>`count(*) filter (where ${transcripts.callOutcome} = 'progressed')::int`,
+      })
+      .from(soapNotes)
+      .innerJoin(transcripts, eq(soapNotes.transcriptId, transcripts.id))
+      .where(and(
+        eq(soapNotes.workspaceId, workspaceId),
+        sql`${soapNotes.icpVerdict} <> ''`,
+        callWindowClause,
+        segmentClause,
+      ))
+      .groupBy(soapNotes.icpVerdict),
+    // NEW: Blocker buckets from soap_notes.blocker_type (v3.1 data)
+    db
+      .select({
+        blocker: soapNotes.blockerType,
+        callCount: sql<number>`count(*)::int`,
+      })
+      .from(soapNotes)
+      .innerJoin(transcripts, eq(soapNotes.transcriptId, transcripts.id))
+      .where(and(
+        eq(soapNotes.workspaceId, workspaceId),
+        sql`${soapNotes.blockerType} <> ''`,
+        callWindowClause,
+        segmentClause,
+        outcomeClause,
+      ))
+      .groupBy(soapNotes.blockerType),
+    db
+      .select({
+        tier: signals.tier,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(eq(signals.workspaceId, workspaceId))
+      .groupBy(signals.tier),
+    db
+      .select({
+        id: signals.id,
+        tier: signals.tier,
+        signalType: signals.signalType,
+        title: signals.title,
+        verbatimQuote: signals.verbatimQuote,
+        reinforcementCount: signals.reinforcementCount,
+        firstSeen: signals.firstSeen,
+        lastReinforced: signals.lastReinforced,
+      })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        notInArray(signals.tier, ["archived", "dismissed"]),
+        signalWindowClause,
+        competitorClause,
+      ))
+      .orderBy(desc(signals.reinforcementCount), desc(signals.lastReinforced))
+      .limit(5),
+    // NEW: Contested signals JOIN approvedSignals so we can render side-by-side
+    db
+      .select({
+        id: signals.id,
+        title: signals.title,
+        verbatimQuote: signals.verbatimQuote,
+        content: signals.content,
+        firstSeen: signals.firstSeen,
+        reinforcementCount: signals.reinforcementCount,
+        sourceTranscriptId: signals.sourceTranscriptId,
+        canonicalId: approvedSignals.id,
+        canonicalTitle: approvedSignals.title,
+        canonicalContent: approvedSignals.content,
+        canonicalApprovedAt: approvedSignals.approvedAt,
+      })
+      .from(signals)
+      .leftJoin(approvedSignals, eq(signals.contestedAgainst, approvedSignals.id))
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          sql`(${signals.tier} = 'contested' OR ${signals.canonicalContradiction} <> 'no')`
+        )
+      )
+      .orderBy(asc(signals.firstSeen))
+      .limit(20),
+    // Competitor mentions ranked
+    db
+      .select({
+        competitorName: signals.competitorName,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          activeTier,
+          sql`${signals.competitorName} <> ''`,
+          signalWindowClause,
+        )
+      )
+      .groupBy(signals.competitorName)
+      .orderBy(desc(sql`count(*)`))
+      .limit(8),
+    // NEW: Competitor mention trend (current window vs prior equivalent window)
+    db
+      .select({
+        competitorName: signals.competitorName,
+        window: sql<"current" | "prior">`case when ${signals.firstSeen} >= ${last30Cutoff} then 'current' else 'prior' end`,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        activeTier,
+        sql`${signals.competitorName} <> ''`,
+        gte(signals.firstSeen, prior30Cutoff),
+      ))
+      .groupBy(signals.competitorName, sql`2`),
+    // NEW: Competitor → win/loss from joined transcripts
+    db
+      .select({
+        competitorName: signals.competitorName,
+        outcome: transcripts.callOutcome,
+        count: sql<number>`count(distinct ${transcripts.id})::int`,
+      })
+      .from(signals)
+      .innerJoin(transcripts, eq(signals.sourceTranscriptId, transcripts.id))
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        activeTier,
+        sql`${signals.competitorName} <> ''`,
+        callWindowClause,
+      ))
+      .groupBy(signals.competitorName, transcripts.callOutcome),
+    db
+      .select({
+        id: signals.id,
+        title: signals.title,
+        verbatimQuote: signals.verbatimQuote,
+        reinforcementCount: signals.reinforcementCount,
+      })
+      .from(signals)
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          activeTier,
+          inArray(signals.signalType, ["use_case", "expansion_signal", "buying_trigger"]),
+          signalWindowClause,
+          competitorClause,
+        )
+      )
+      .orderBy(desc(signals.reinforcementCount), desc(signals.lastReinforced))
+      .limit(5),
+    // Objection-style signals — keyword-bucket fallback for pre-v3.1 transcripts
+    db
+      .select({
+        title: signals.title,
+        content: signals.content,
+        signalType: signals.signalType,
+      })
+      .from(signals)
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          activeTier,
+          inArray(signals.signalType, ["objection", "pricing_signal", "churn_risk"]),
+          signalWindowClause,
+          competitorClause,
+        )
+      ),
+    db
+      .select({
+        id: signals.id,
+        title: signals.title,
+        verbatimQuote: signals.verbatimQuote,
+        reinforcementCount: signals.reinforcementCount,
+        account: transcripts.prospectAccount,
+        contact: transcripts.prospectContact,
+        callOutcome: transcripts.callOutcome,
+      })
+      .from(signals)
+      .innerJoin(transcripts, eq(signals.sourceTranscriptId, transcripts.id))
+      .where(
+        and(
+          eq(signals.workspaceId, workspaceId),
+          activeTier,
+          eq(signals.polarity, "Reinforces"),
+          eq(transcripts.callOutcome, "progressed"),
+          callWindowClause,
+        )
+      )
+      .orderBy(desc(signals.reinforcementCount), desc(signals.lastReinforced))
+      .limit(6),
+    // Auto-Answers Queue (Spec Module 4). Repeat questions worth a canonical answer.
+    db
+      .select({
+        id: autoAnswers.id,
+        question: autoAnswers.question,
+        draftedAnswer: autoAnswers.draftedAnswer,
+        frequency: autoAnswers.frequency,
+        state: autoAnswers.state,
+      })
+      .from(autoAnswers)
+      .where(
+        and(
+          eq(autoAnswers.workspaceId, workspaceId),
+          notInArray(autoAnswers.state, ["dismissed", "approved"])
+        )
+      )
+      .orderBy(desc(autoAnswers.frequency))
+      .limit(5),
+    // What-changed-this-week: counts only, no rows
+    db
+      .select({ count: sql<number>`count(distinct ${signals.title})::int` })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        activeTier,
+        eq(signals.signalType, "objection"),
+        gte(signals.firstSeen, last7Cutoff),
+        gte(signals.reinforcementCount, 2),
+      )),
+    db
+      .select({ count: sql<number>`count(distinct ${signals.competitorName})::int` })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        activeTier,
+        eq(signals.signalType, "competitor_mention"),
+        sql`${signals.competitorTagged} IS NULL`,
+        sql`${signals.competitorName} <> ''`,
+        gte(signals.firstSeen, last7Cutoff),
+      )),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        eq(signals.tier, "concrete"),
+        gte(signals.createdAt, last7Cutoff),
+      )),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(signals)
+      .where(and(
+        eq(signals.workspaceId, workspaceId),
+        eq(signals.tier, "contested"),
+      )),
+    // Filter options — distinct values for the dropdowns
+    db
+      .select({ name: competitors.name })
+      .from(competitors)
+      .where(eq(competitors.workspaceId, workspaceId))
+      .orderBy(asc(competitors.name)),
+    db
+      .select({ segment: sql<string>`distinct ${soapNotes.segmentTagged}` })
+      .from(soapNotes)
+      .where(and(
+        eq(soapNotes.workspaceId, workspaceId),
+        sql`${soapNotes.segmentTagged} <> ''`,
+      )),
     db
       .select({
         total: sql<number>`count(*)::int`,
@@ -322,6 +723,41 @@ async function loadDashboardData(workspaceId: string) {
     callStats[0]?.progressed ?? 0
   );
 
+  // ICP from verdict (v3.1 data path)
+  const icpVerdictBuckets: Record<"Core" | "Adjacent" | "Outside" | "Unclear", number> = {
+    Core: 0, Adjacent: 0, Outside: 0, Unclear: 0,
+  };
+  const icpVerdictWinRates: Record<string, { progressed: number; total: number }> = {
+    Core: { progressed: 0, total: 0 },
+    Adjacent: { progressed: 0, total: 0 },
+    Outside: { progressed: 0, total: 0 },
+    Unclear: { progressed: 0, total: 0 },
+  };
+  for (const r of icpFromVerdictRows) {
+    const bucket = mapIcpVerdictToBucket(r.verdict);
+    icpVerdictBuckets[bucket] += r.callCount;
+    icpVerdictWinRates[bucket].total += r.callCount;
+    icpVerdictWinRates[bucket].progressed += r.progressed;
+  }
+  const icpVerdictTotal = sumBucket(icpVerdictBuckets);
+
+  // Blocker from verdict (v3.1 data path)
+  const blockerVerdictBuckets: Record<"Price" | "Trust" | "Timing" | "Product" | "Fit" | "Not Blocked", number> = {
+    Price: 0, Trust: 0, Timing: 0, Product: 0, Fit: 0, "Not Blocked": 0,
+  };
+  for (const r of blockerVerdictRows) {
+    const bucket = mapBlockerVerdictToBucket(r.blocker);
+    blockerVerdictBuckets[bucket] += r.callCount;
+  }
+  const blockerVerdictTotal = sumBucket(blockerVerdictBuckets);
+
+  // Competitor expanded stats: mention share + win rate + trend
+  const competitorStats = buildCompetitorStats(
+    competitorRows,
+    competitorTrendRows,
+    competitorWinLossRows
+  );
+
   return {
     callCount: callStats[0]?.total ?? 0,
     outcomes: {
@@ -335,20 +771,87 @@ async function loadDashboardData(workspaceId: string) {
     polarityByPillar,
     icpBuckets,
     icpTotal,
+    icpFromVerdict: {
+      buckets: icpVerdictBuckets,
+      total: icpVerdictTotal,
+      winRates: icpVerdictWinRates,
+    },
+    blockerFromVerdict: {
+      buckets: blockerVerdictBuckets,
+      total: blockerVerdictTotal,
+    },
     tierCounts: tierCounts.reduce<Record<string, number>>((acc, r) => {
       acc[r.tier] = r.count;
       return acc;
     }, {}),
     topSignals,
     contestedSignals: contestedRows,
+    contestedWithCanon: contestedRows,
     competitorRows,
+    competitorStats,
     terminalBenefits: benefitRows,
     blockerBuckets,
     blockerTotal,
     enablementSignals: enablementRows,
     autoAnswers: autoAnswerRows,
     icpTrend,
+    whatChanged: {
+      newPains: newPainsCount[0]?.count ?? 0,
+      newCompetitors: newCompetitorsCount[0]?.count ?? 0,
+      graduated: graduatedCount[0]?.count ?? 0,
+      contestedUnresolved: contestedCount[0]?.count ?? 0,
+    },
+    filterOptions: {
+      competitors: distinctCompetitors.map((r) => r.name),
+      segments: distinctSegments.map((r) => r.segment).filter(Boolean),
+    },
   };
+}
+
+function mapIcpVerdictToBucket(verdict: string): "Core" | "Adjacent" | "Outside" | "Unclear" {
+  const v = verdict.toLowerCase();
+  if (v.startsWith("core")) return "Core";
+  if (v.startsWith("adjacent")) return "Adjacent";
+  if (v.startsWith("outside")) return "Outside";
+  return "Unclear";
+}
+
+function mapBlockerVerdictToBucket(b: string): "Price" | "Trust" | "Timing" | "Product" | "Fit" | "Not Blocked" {
+  const v = b.toLowerCase();
+  if (v === "price") return "Price";
+  if (v === "trust") return "Trust";
+  if (v === "timing") return "Timing";
+  if (v === "product") return "Product";
+  if (v === "fit") return "Fit";
+  return "Not Blocked";
+}
+
+function buildCompetitorStats(
+  mentionRows: { competitorName: string; count: number }[],
+  trendRows: { competitorName: string; window: "current" | "prior"; count: number }[],
+  winLossRows: { competitorName: string; outcome: string; count: number }[]
+) {
+  const totalMentions = mentionRows.reduce((a, b) => a + b.count, 0) || 1;
+  return mentionRows.map((m) => {
+    const current = trendRows.find((t) => t.competitorName === m.competitorName && t.window === "current")?.count ?? 0;
+    const prior = trendRows.find((t) => t.competitorName === m.competitorName && t.window === "prior")?.count ?? 0;
+    const trendDelta = current - prior;
+    const winsRow = winLossRows.find((w) => w.competitorName === m.competitorName && w.outcome === "progressed");
+    const lossesRow = winLossRows.find((w) => w.competitorName === m.competitorName && w.outcome === "lost");
+    const wins = winsRow?.count ?? 0;
+    const losses = lossesRow?.count ?? 0;
+    const decided = wins + losses;
+    const winRate = decided === 0 ? null : Math.round((wins / decided) * 100);
+    return {
+      name: m.competitorName,
+      mentions: m.count,
+      sharePct: Math.round((m.count / totalMentions) * 100),
+      trendDelta,
+      wins,
+      losses,
+      winRate,
+    };
+  });
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -603,31 +1106,63 @@ function HorizontalBars({
 }
 
 function IcpDistribution({
-  counts, total, trend,
+  buckets, total, winRates, trend, fallbackBuckets, fallbackTotal,
 }: {
-  counts: Record<string, number>;
+  buckets: Record<string, number>;
   total: number;
+  winRates: Record<string, { progressed: number; total: number }>;
   trend: { currentCorePct: number | null; priorCorePct: number | null; currentTotal: number; priorTotal: number };
+  fallbackBuckets: Record<string, number>;
+  fallbackTotal: number;
 }) {
+  // Prefer v3.1 verdict data when present. Fall back to signal-polarity bucketing
+  // for workspaces that haven't re-processed their transcripts yet.
+  const useFallback = total === 0 && fallbackTotal > 0;
+  const activeBuckets = useFallback ? fallbackBuckets : buckets;
+  const activeTotal = useFallback ? fallbackTotal : total;
+
   const rows = (["Core", "Adjacent", "Outside", "Unclear"] as const).map((label) => ({
-    label, count: counts[label] ?? 0,
+    label, count: activeBuckets[label] ?? 0,
   }));
-  // ICP drift alert: only show when both windows have data and there's a meaningful delta.
+
   let alert: { tone: "danger" | "warn" | "ok"; text: string } | null = null;
   if (trend.currentCorePct !== null && trend.priorCorePct !== null && trend.currentTotal >= 3 && trend.priorTotal >= 3) {
     const delta = trend.currentCorePct - trend.priorCorePct;
     if (delta <= -10) {
-      alert = { tone: "danger", text: `ICP drift detected. ${trend.currentCorePct}% of recent ICP signals are Core, vs. ${trend.priorCorePct}% prior period.` };
+      alert = { tone: "danger", text: `ICP drift detected. ${trend.currentCorePct}% Core in recent window vs ${trend.priorCorePct}% prior.` };
     } else if (delta >= 10) {
-      alert = { tone: "ok", text: `ICP fit improving. Core share rose from ${trend.priorCorePct}% to ${trend.currentCorePct}% vs prior period.` };
+      alert = { tone: "ok", text: `ICP fit improving. Core share rose from ${trend.priorCorePct}% to ${trend.currentCorePct}%.` };
     } else {
       alert = { tone: "warn", text: `ICP fit stable. ${trend.currentCorePct}% Core this window, ${trend.priorCorePct}% prior.` };
     }
   }
+
   return (
-    <SectionShell title="ICP Fit Distribution" hint="Derived from ICP signals tagged in transcripts">
+    <SectionShell
+      title="ICP Fit Distribution"
+      hint={useFallback
+        ? "Derived from ICP signal polarity (pre-v3.1 fallback)"
+        : "Per-call verdict with progression rate"}
+    >
       <div className="glass-card p-5 space-y-4">
-        <HorizontalBars rows={rows} total={total} emptyLabel="No ICP signals captured yet." />
+        <HorizontalBars rows={rows} total={activeTotal} emptyLabel="No ICP verdicts captured yet." />
+        {!useFallback && activeTotal > 0 ? (
+          <div className="mt-3 pt-3 border-t border-white/5 grid grid-cols-4 gap-2 text-xs">
+            {(["Core", "Adjacent", "Outside", "Unclear"] as const).map((label) => {
+              const wr = winRates[label];
+              const pct = wr.total === 0 ? null : Math.round((wr.progressed / wr.total) * 100);
+              return (
+                <div key={label} className="text-center">
+                  <p className="text-[10px] uppercase tracking-wider text-[var(--color-atib-text-dim)]">{label}</p>
+                  <p className="mt-1 text-sm font-medium text-[var(--color-atib-text)] tabular-nums">
+                    {pct === null ? "—" : `${pct}%`}
+                  </p>
+                  <p className="text-[10px] text-[var(--color-atib-text-dim)]">progression rate</p>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
         {alert ? (
           <p className={
             alert.tone === "danger" ? "text-xs text-rose-400"
@@ -691,14 +1226,27 @@ function AutoAnswersQueue({
 }
 
 function BlockerDistribution({
-  counts, total,
-}: { counts: Record<string, number>; total: number }) {
+  buckets, total, fallbackBuckets, fallbackTotal,
+}: {
+  buckets: Record<string, number>;
+  total: number;
+  fallbackBuckets: Record<string, number>;
+  fallbackTotal: number;
+}) {
+  const useFallback = total === 0 && fallbackTotal > 0;
+  const activeBuckets = useFallback ? fallbackBuckets : buckets;
+  const activeTotal = useFallback ? fallbackTotal : total;
   const order = ["Price", "Trust", "Timing", "Product", "Fit", "Not Blocked"] as const;
-  const rows = order.map((label) => ({ label, count: counts[label] ?? 0 }));
+  const rows = order.map((label) => ({ label, count: activeBuckets[label] ?? 0 }));
   return (
-    <SectionShell title="Real Blocker Distribution" hint="Bucketed from objection-class signals + progressed-call count">
+    <SectionShell
+      title="Real Blocker Distribution"
+      hint={useFallback
+        ? "Keyword-bucketed from objection signals (pre-v3.1 fallback)"
+        : "Per-call SOAP Assessment verdict"}
+    >
       <div className="glass-card p-5">
-        <HorizontalBars rows={rows} total={total} emptyLabel="No blockers detected yet." />
+        <HorizontalBars rows={rows} total={activeTotal} emptyLabel="No blockers detected yet." />
       </div>
     </SectionShell>
   );
@@ -781,70 +1329,293 @@ function TopSignalsTable({
   );
 }
 
+function daysOld(d: Date | string | null): number {
+  if (!d) return 0;
+  const date = typeof d === "string" ? new Date(d) : d;
+  if (isNaN(date.getTime())) return 0;
+  return Math.floor((Date.now() - date.getTime()) / (24 * 60 * 60 * 1000));
+}
+
 function ContestedQueue({
   signals: contested, callCount,
 }: {
-  signals: Array<{ id: string; title: string; verbatimQuote: string; content: string; sourceTranscriptId: string | null }>;
+  signals: Array<{
+    id: string;
+    title: string;
+    verbatimQuote: string;
+    content: string;
+    firstSeen: Date | string | null;
+    reinforcementCount: number;
+    sourceTranscriptId: string | null;
+    canonicalId: string | null;
+    canonicalTitle: string | null;
+    canonicalContent: string | null;
+    canonicalApprovedAt: Date | string | null;
+  }>;
   callCount: number;
 }) {
+  // Hard lock: any contested signal past 30 days locks the module per thesis Part E.
+  const expired = contested.filter((s) => daysOld(s.firstSeen) >= 30);
+  const showLockBanner = expired.length > 0;
+
   return (
-    <SectionShell title="Contested Queue" hint="Signals that contradict the canonical positioning">
+    <SectionShell
+      title="Contested Queue"
+      hint={contested.length === 0
+        ? "Signals contradicting canonical positioning"
+        : `${contested.length} requires PMM review · 30-day hard limit per Part E`}
+    >
+      {showLockBanner ? (
+        <div className="glass-card p-4 mb-3 border border-rose-500/40 bg-rose-500/[0.06]">
+          <p className="text-sm text-rose-300 font-medium">
+            Dashboard lock: {expired.length} contested signal{expired.length === 1 ? " has" : "s have"} exceeded 30 days.
+          </p>
+          <p className="mt-1 text-xs text-[var(--color-atib-text-dim)]">
+            Resolve in favour of canonical or new before other intelligence modules read as trustworthy.
+          </p>
+        </div>
+      ) : null}
+
       {contested.length === 0 ? (
         <div className="glass-card p-5">
           <p className="text-sm text-[var(--color-atib-text-muted)]">
             No contradictions detected across {callCount} {callCount === 1 ? "call" : "calls"}.
           </p>
           <p className="mt-1 text-xs text-[var(--color-atib-text-dim)]">
-            This read is meaningful only above 15 calls. Below that, treat as “too early to tell” rather than “canon holds”.
+            This read is meaningful only above 15 calls. Below that, treat as &ldquo;too early to tell&rdquo; rather than &ldquo;canon holds&rdquo;.
           </p>
         </div>
       ) : (
-        <div className="space-y-3">
-          {contested.map((s) => (
-            <div key={s.id} className="glass-card p-4 border border-rose-500/20 bg-rose-500/[0.03]">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-[var(--color-atib-text)]">{s.title}</p>
-                  {s.verbatimQuote ? (
-                    <p className="mt-1 italic text-xs text-[var(--color-atib-text-dim)]">
-                      “{s.verbatimQuote}”
-                    </p>
-                  ) : null}
-                  <p className="mt-2 text-xs text-[var(--color-atib-text-muted)]">{s.content}</p>
+        <div className="space-y-4">
+          {contested.map((s) => {
+            const age = daysOld(s.firstSeen);
+            const isExpired = age >= 30;
+            return (
+              <div
+                key={s.id}
+                className={`glass-card p-5 border ${isExpired ? "border-rose-500/50 bg-rose-500/[0.05]" : "border-rose-500/20 bg-rose-500/[0.03]"}`}
+              >
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded border bg-rose-500/15 text-rose-300 border-rose-500/30">
+                    Requires PMM review
+                  </span>
+                  <span className={`text-[10px] uppercase tracking-wider ${isExpired ? "text-rose-400" : "text-[var(--color-atib-text-dim)]"}`}>
+                    {age} day{age === 1 ? "" : "s"} unresolved · {s.reinforcementCount} reinforced
+                  </span>
                 </div>
-                <span className="shrink-0 inline-flex items-center px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded border bg-rose-500/15 text-rose-300 border-rose-500/30">
-                  Requires PMM review
-                </span>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="lg:pr-4 lg:border-r border-white/5">
+                    <p className="text-[10px] uppercase tracking-wider text-emerald-400 mb-1">Canonical (concrete)</p>
+                    {s.canonicalTitle ? (
+                      <>
+                        <p className="text-sm font-medium text-[var(--color-atib-text)]">{s.canonicalTitle}</p>
+                        <p className="mt-1 text-xs text-[var(--color-atib-text-muted)]">{s.canonicalContent}</p>
+                        <p className="mt-2 text-[10px] text-[var(--color-atib-text-dim)]">
+                          Approved {fmtDate(s.canonicalApprovedAt)}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-xs text-[var(--color-atib-text-dim)] italic">
+                        Contradiction declared by the SOAP agent but no specific Concrete signal was named.
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-[10px] uppercase tracking-wider text-rose-400 mb-1">New (contested)</p>
+                    <p className="text-sm font-medium text-[var(--color-atib-text)]">{s.title}</p>
+                    {s.verbatimQuote ? (
+                      <p className="mt-1 italic text-xs text-[var(--color-atib-text-dim)]">&ldquo;{s.verbatimQuote}&rdquo;</p>
+                    ) : null}
+                    <p className="mt-2 text-xs text-[var(--color-atib-text-muted)]">{s.content}</p>
+                  </div>
+                </div>
+                <div className="mt-4 pt-3 border-t border-white/5 flex flex-wrap gap-2">
+                  <form action={`/api/signals/${s.id}/dismiss`} method="POST">
+                    <button
+                      type="submit"
+                      className="inline-flex items-center px-3 py-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-xs hover:bg-emerald-500/20"
+                    >
+                      Accept canonical
+                    </button>
+                  </form>
+                  <form action={`/api/signals/${s.id}/approve`} method="POST">
+                    <button
+                      type="submit"
+                      className="inline-flex items-center px-3 py-1.5 rounded-md border border-rose-500/30 bg-rose-500/10 text-rose-300 text-xs hover:bg-rose-500/20"
+                    >
+                      Accept new
+                    </button>
+                  </form>
+                  {s.sourceTranscriptId ? (
+                    <Link
+                      href={`/calls/${s.sourceTranscriptId}`}
+                      className="ml-auto inline-flex items-center text-xs underline underline-offset-2 text-[var(--color-atib-text-dim)] hover:text-[var(--color-atib-text)]"
+                    >
+                      View source call →
+                    </Link>
+                  ) : null}
+                </div>
               </div>
-              {s.sourceTranscriptId ? (
-                <Link
-                  href={`/calls/${s.sourceTranscriptId}`}
-                  className="mt-3 inline-block text-xs underline underline-offset-2 text-[var(--color-atib-text-dim)] hover:text-[var(--color-atib-text)]"
-                >
-                  View source call →
-                </Link>
-              ) : null}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </SectionShell>
   );
 }
 
-function CompetitorMentions({
+function CompetitorIntel({
   rows,
 }: {
-  rows: { competitorName: string; count: number }[];
+  rows: Array<{
+    name: string;
+    mentions: number;
+    sharePct: number;
+    trendDelta: number;
+    wins: number;
+    losses: number;
+    winRate: number | null;
+  }>;
 }) {
-  const total = rows.reduce((a, b) => a + b.count, 0);
-  const ranked = rows.map((r) => ({ label: r.competitorName, count: r.count }));
   return (
-    <SectionShell title="Competitor Mention Frequency" hint="Named in live calls, ranked">
-      <div className="glass-card p-5">
-        <HorizontalBars rows={ranked} total={total} emptyLabel="No competitors named yet." />
+    <SectionShell title="Competitor Intelligence" hint="Mention share, win rate vs each competitor, 30-day trend">
+      <div className="glass-card overflow-hidden">
+        {rows.length === 0 ? (
+          <div className="p-5">
+            <p className="text-xs text-[var(--color-atib-text-dim)]">No competitor mentions in this window.</p>
+          </div>
+        ) : (
+          <table className="w-full text-xs">
+            <thead className="text-left text-[10px] uppercase tracking-[0.12em] text-[var(--color-atib-text-dim)] border-b border-white/5">
+              <tr>
+                <th className="px-4 py-3 font-medium">Competitor</th>
+                <th className="px-4 py-3 font-medium text-right">Mentions</th>
+                <th className="px-4 py-3 font-medium text-right">Share</th>
+                <th className="px-4 py-3 font-medium text-right">Trend</th>
+                <th className="px-4 py-3 font-medium text-right">Win rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const trendArrow =
+                  r.trendDelta > 0 ? "▲" : r.trendDelta < 0 ? "▼" : "—";
+                const trendClass =
+                  r.trendDelta > 2 ? "text-rose-400"
+                  : r.trendDelta < -2 ? "text-emerald-400"
+                  : "text-[var(--color-atib-text-dim)]";
+                return (
+                  <tr key={r.name} className="border-t border-white/5">
+                    <td className="px-4 py-3 font-medium text-[var(--color-atib-text)]">{r.name}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{r.mentions}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-[var(--color-atib-text-muted)]">
+                      {r.sharePct}%
+                    </td>
+                    <td className={`px-4 py-3 text-right tabular-nums ${trendClass}`}>
+                      {trendArrow} {Math.abs(r.trendDelta) || ""}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {r.winRate === null ? (
+                        <span className="text-[var(--color-atib-text-dim)]">—</span>
+                      ) : (
+                        <span className={r.winRate >= 50 ? "text-emerald-400" : r.winRate <= 30 ? "text-rose-400" : "text-[var(--color-atib-text)]"}>
+                          {r.winRate}%
+                        </span>
+                      )}
+                      {r.wins + r.losses > 0 ? (
+                        <span className="ml-1 text-[10px] text-[var(--color-atib-text-dim)]">
+                          ({r.wins}W·{r.losses}L)
+                        </span>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </SectionShell>
+  );
+}
+
+function WhatChangedHero({
+  changes, window,
+}: {
+  changes: {
+    newPains: number;
+    newCompetitors: number;
+    graduated: number;
+    contestedUnresolved: number;
+  };
+  window: FilterValues["window"];
+}) {
+  const total =
+    changes.newPains + changes.newCompetitors + changes.graduated + changes.contestedUnresolved;
+  const isQuiet = total === 0;
+  return (
+    <SectionShell
+      title="What changed this week"
+      hint={window === "all" ? "Rolling 7-day emergence window (filter ignores 'All time')" : "Rolling 7-day emergence window"}
+    >
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <ChangeTile
+          label="New pains"
+          count={changes.newPains}
+          tone="warn"
+          hint="Objection-type signals first seen in last 7d with 2+ reinforcements"
+        />
+        <ChangeTile
+          label="New competitors"
+          count={changes.newCompetitors}
+          tone="warn"
+          hint="Untracked vendors named in the last 7d"
+        />
+        <ChangeTile
+          label="Graduated to concrete"
+          count={changes.graduated}
+          tone="ok"
+          hint="Signals PMM approved as canonical in the last 7d"
+        />
+        <ChangeTile
+          label="Contested unresolved"
+          count={changes.contestedUnresolved}
+          tone={changes.contestedUnresolved > 0 ? "danger" : "muted"}
+          hint="Awaiting PMM resolution"
+        />
+      </div>
+      {isQuiet ? (
+        <p className="text-xs text-[var(--color-atib-text-dim)] mt-3 px-1">
+          Quiet week — nothing has crossed the emergence threshold. This is meaningful only above 15 calls; below that it&rsquo;s &ldquo;not enough data&rdquo; not &ldquo;market is stable&rdquo;.
+        </p>
+      ) : null}
+    </SectionShell>
+  );
+}
+
+function ChangeTile({
+  label, count, tone, hint,
+}: {
+  label: string;
+  count: number;
+  tone: "warn" | "ok" | "danger" | "muted";
+  hint: string;
+}) {
+  const toneClass =
+    tone === "ok" ? "border-emerald-500/30 bg-emerald-500/5"
+    : tone === "warn" ? "border-amber-500/30 bg-amber-500/5"
+    : tone === "danger" ? "border-rose-500/30 bg-rose-500/5"
+    : "border-white/10 bg-white/[0.02]";
+  const numberClass =
+    tone === "ok" ? "text-emerald-400"
+    : tone === "warn" ? "text-amber-400"
+    : tone === "danger" ? "text-rose-400"
+    : "text-[var(--color-atib-text-muted)]";
+  return (
+    <div className={`rounded-xl border p-4 ${toneClass}`}>
+      <p className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-atib-text-dim)]">{label}</p>
+      <p className={`mt-2 text-3xl font-bold leading-none ${numberClass}`}>{count}</p>
+      <p className="mt-2 text-[10px] text-[var(--color-atib-text-dim)] leading-snug">{hint}</p>
+    </div>
   );
 }
 
