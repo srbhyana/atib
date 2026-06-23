@@ -5,12 +5,13 @@ import { ingestTranscript } from "@/lib/agents/transcript-intake";
 import { runSoapAnalysis } from "@/lib/agents/soap";
 import { getCanonicalContext } from "@/lib/agents/canonical-context";
 import { ingestSignals } from "@/lib/agents/signal-bank";
+import { ingestAutoAnswer } from "@/lib/agents/auto-answer-bank";
 import { buildSingleCallView } from "@/lib/agents/single-call-dashboard";
 import { db } from "@/lib/db/client";
-import { soapNotes, transcripts, autoAnswers, workspaces } from "@/lib/db/schema";
+import { soapNotes, transcripts, workspaces } from "@/lib/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import type { CallOutcome } from "@/lib/utils/types";
-import { decryptSecret } from "@/lib/security/secrets";
+import { decryptSecret, getWorkspaceOpenAIKey } from "@/lib/security/secrets";
 
 /**
  * POST /api/transcripts
@@ -134,17 +135,28 @@ export async function POST(request: Request) {
       }
     );
 
-    // 6. Ingest questions into auto-answers
+    // 6. Ingest questions into auto-answers with semantic dedup. Repeat
+    //    questions across calls now increment frequency on the existing row
+    //    instead of creating duplicates. The spec's "3+ calls" promotion
+    //    threshold becomes reachable.
     if (soapResult.analysis.questions && soapResult.analysis.questions.length > 0) {
+      const openaiKey = await getWorkspaceOpenAIKey(session.workspaceId);
       for (const q of soapResult.analysis.questions) {
-        await db.insert(autoAnswers).values({
-          workspaceId: session.workspaceId,
-          question: q.question,
-          draftedAnswer: q.draftedAnswer || "",
-          alternatives: q.alternatives || [],
-          frequency: 1,
-          sourceAccount: transcript.prospectAccount || "",
-        });
+        if (!q.question || !q.question.trim()) continue;
+        try {
+          await ingestAutoAnswer(
+            session.workspaceId,
+            {
+              question: q.question,
+              draftedAnswer: q.draftedAnswer || "",
+              alternatives: q.alternatives || [],
+              sourceAccount: transcript.prospectAccount || "",
+            },
+            openaiKey
+          );
+        } catch (err) {
+          console.warn("Auto-answer ingest failed for one question:", err);
+        }
       }
     }
 

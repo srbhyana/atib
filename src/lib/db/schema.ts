@@ -384,6 +384,11 @@ export const autoAnswers = pgTable("auto_answers", {
   state: autoAnswerStateEnum("state").default("suggestion").notNull(),
   sourceAccount: text("source_account").default("").notNull(),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
+  // Vector of the question text — used for semantic dedup so re-asks across
+  // calls increment frequency instead of flooding the queue with duplicates.
+  questionEmbedding: vector("question_embedding"),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const battlecards = pgTable("battlecards", {
