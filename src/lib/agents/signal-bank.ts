@@ -4,6 +4,7 @@ import { eq, and, desc, sql } from "drizzle-orm";
 import type { SignalOutput, Tier, SignalType, Polarity, Importance } from "@/lib/utils/types";
 import { inngest } from "@/lib/jobs/client";
 import { evaluateAndApplyTransition } from "./tier-runner";
+import { getEmbedding } from "@/lib/llm/openai";
 
 /**
  * Signal Bank Agent — Phase 2.
@@ -14,6 +15,62 @@ import { evaluateAndApplyTransition } from "./tier-runner";
  * Phase 2: Three-check dedup (cosine similarity + type + polarity),
  *          tier state machine wiring, contested resolution.
  */
+
+/**
+ * Resolve the LLM-emitted `contestedAgainst` title text to a real
+ * approvedSignals.id UUID so the dashboard's side-by-side render has
+ * something to join against. Two-step match:
+ *   1. Case-insensitive exact title match.
+ *   2. Case-insensitive substring either direction (the LLM often shortens
+ *      or paraphrases the title slightly).
+ * Returns null when no plausible match — the side-by-side falls back to the
+ * "no specific Concrete named" empty-state copy.
+ */
+function resolveContestedAgainst(
+  raw: string,
+  approved: { id: string; title: string }[]
+): string | null {
+  const t = raw.trim().toLowerCase();
+  if (!t) return null;
+  const exact = approved.find((a) => a.title.trim().toLowerCase() === t);
+  if (exact) return exact.id;
+  const sub = approved.find(
+    (a) => a.title.trim().toLowerCase().includes(t) || t.includes(a.title.trim().toLowerCase())
+  );
+  return sub ? sub.id : null;
+}
+
+/**
+ * Inline embed + dedup wrapper. Eliminates the 24-hour Inngest cron lag for
+ * the in-line transcript path. The cron stays as a safety net for any signal
+ * the inline path missed (OpenAI down, exception, etc.).
+ *
+ * Returns the dedup action so the caller can decide whether to skip downstream
+ * work (e.g. tier evaluation is pointless on a "reinforced" outcome — the
+ * survivor already had it run, the duplicate is about to be archived).
+ */
+async function embedAndDedupeSignalInline(
+  signalId: string,
+  workspaceId: string,
+  text: string,
+  openaiKey: string | null
+): Promise<{ action: "reinforced" | "flagged" | "new" | "skipped"; matchedId?: string }> {
+  let embedding: number[];
+  try {
+    embedding = await getEmbedding(text, openaiKey);
+  } catch (err) {
+    console.warn("Inline signal embedding failed; falling back to cron:", err);
+    return { action: "skipped" };
+  }
+
+  // Write the embedding back so the row matches what the Inngest job would do.
+  await db
+    .update(signals)
+    .set({ embedding })
+    .where(and(eq(signals.id, signalId), eq(signals.workspaceId, workspaceId)));
+
+  return deduplicateSignal(signalId, workspaceId);
+}
 
 // Scale a float in [min, max] to an int in [min*scale, max*scale], clamping
 // out-of-range or non-numeric input to `fallback * scale` (or to the bound
@@ -37,15 +94,23 @@ export async function ingestSignals(
   transcriptId: string,
   soapNoteId: string,
   rawSignals: SignalOutput[],
-  callContext: { callLevelPersona?: string; callLevelSegment?: string } = {}
+  callContext: {
+    callLevelPersona?: string;
+    callLevelSegment?: string;
+    openaiKey?: string | null;
+  } = {}
 ): Promise<void> {
   if (!rawSignals || rawSignals.length === 0) return;
 
-  // Look up competitor IDs for tagging
-  const comps = await db
-    .select()
-    .from(competitors)
-    .where(eq(competitors.workspaceId, workspaceId));
+  // One round-trip up front: pull competitors (FK match for competitor_tagged)
+  // and approved Concrete signals (FK match for contested_against).
+  const [comps, approved] = await Promise.all([
+    db.select().from(competitors).where(eq(competitors.workspaceId, workspaceId)),
+    db
+      .select({ id: approvedSignals.id, title: approvedSignals.title })
+      .from(approvedSignals)
+      .where(eq(approvedSignals.workspaceId, workspaceId)),
+  ]);
 
   const compMap = new Map(comps.map((c) => [c.name.toLowerCase(), c.id]));
 
@@ -53,6 +118,14 @@ export async function ingestSignals(
     const competitorId = signal.competitorTagged
       ? compMap.get(signal.competitorTagged.toLowerCase()) || null
       : null;
+
+    // Resolve the LLM's text reference (e.g. "Pricing is not our differentiator")
+    // to the actual approvedSignals row UUID. NULL when no match — the
+    // contested side-by-side renders the empty-state copy in that case.
+    const contestedAgainstId =
+      signal.canonicalContradiction !== "no" && signal.contestedAgainst
+        ? resolveContestedAgainst(signal.contestedAgainst, approved)
+        : null;
 
     // Persona/segment fallback: prefer per-signal LLM output when it eventually
     // emits those fields; for now we denormalise from the call-level analysis.
@@ -85,6 +158,7 @@ export async function ingestSignals(
         personaTagged: persona,
         segmentTagged: segment,
         canonicalContradiction: signal.canonicalContradiction || "no",
+        contestedAgainst: contestedAgainstId,
         route: signal.route || "signal_library",
         sourceSection: signal.sourceSection || "",
         // v3.1 framework tags
@@ -103,6 +177,8 @@ export async function ingestSignals(
       .returning({ id: signals.id });
 
     if (inserted?.id) {
+      // Best-effort Inngest event so the existing cron stays a safety net
+      // for any signal the inline path misses (OpenAI outage etc.).
       try {
         await inngest.send({
           name: "signal/created",
@@ -112,11 +188,36 @@ export async function ingestSignals(
         console.warn("Inngest send failed (signal/created):", err);
       }
 
-      // Tier transition: usually a no-op for a brand-new signal (count=1)
-      // unless the LLM emitted state='evolving' or reinforcementCount was
-      // pre-set on the row (bulk import path with high mention counts).
+      // Inline embed + dedup: removes the 24h cron lag. Survivor of a dedup
+      // hit gets reinforced; the new (duplicate) row is archived in-place.
+      const dedupText = [
+        signal.title,
+        signal.content,
+        signal.quote,
+        signal.inferredMeaning,
+      ].filter(Boolean).join("\n");
+      let dedupAction: "reinforced" | "flagged" | "new" | "skipped" = "skipped";
+      let matchedSurvivorId: string | undefined;
       try {
-        await evaluateAndApplyTransition(inserted.id, workspaceId);
+        const dedupResult = await embedAndDedupeSignalInline(
+          inserted.id,
+          workspaceId,
+          dedupText,
+          callContext.openaiKey ?? null
+        );
+        dedupAction = dedupResult.action;
+        matchedSurvivorId = dedupResult.matchedId;
+      } catch (err) {
+        console.warn("Inline signal dedup failed:", err);
+      }
+
+      // Tier transition fires on:
+      //   - the survivor when this signal got merged into one (reinforced)
+      //   - the new row when it's genuinely new (or dedup skipped)
+      const targetForTier =
+        dedupAction === "reinforced" && matchedSurvivorId ? matchedSurvivorId : inserted.id;
+      try {
+        await evaluateAndApplyTransition(targetForTier, workspaceId);
       } catch (err) {
         console.warn("Tier transition evaluation failed:", err);
       }

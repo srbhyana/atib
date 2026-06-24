@@ -122,8 +122,10 @@ export async function POST(request: Request) {
       })
       .returning();
 
-    // 5. Ingest signals — denormalise the call-level persona/segment down to each signal
-    //    so signals.persona_tagged / segment_tagged carry meaningful values for filtering.
+    // 5. Ingest signals — denormalise the call-level persona/segment, hand the
+    //    workspace OpenAI key down so inline embed+dedup can run synchronously
+    //    instead of waiting for the daily Inngest cron.
+    const openaiKey = await getWorkspaceOpenAIKey(session.workspaceId);
     await ingestSignals(
       session.workspaceId,
       transcript.id,
@@ -132,6 +134,7 @@ export async function POST(request: Request) {
       {
         callLevelPersona: a.personaTagged || "",
         callLevelSegment: a.segmentTagged || "",
+        openaiKey,
       }
     );
 
@@ -140,7 +143,6 @@ export async function POST(request: Request) {
     //    instead of creating duplicates. The spec's "3+ calls" promotion
     //    threshold becomes reachable.
     if (soapResult.analysis.questions && soapResult.analysis.questions.length > 0) {
-      const openaiKey = await getWorkspaceOpenAIKey(session.workspaceId);
       for (const q of soapResult.analysis.questions) {
         if (!q.question || !q.question.trim()) continue;
         try {

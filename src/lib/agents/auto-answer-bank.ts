@@ -106,6 +106,16 @@ export async function ingestAutoAnswer(
         lastSeenAt: new Date(),
         draftedAnswer: betterAnswer,
         sourceAccount: input.sourceAccount || sql`source_account`,
+        // State promotion: spec says a question is worth canonical attention
+        // once it has shown up in 3+ calls. We bump suggestion → evolving on
+        // that threshold. PMM-approved + dismissed states are untouched.
+        state: sql`
+          case
+            when ${autoAnswers.state} = 'suggestion' and ${autoAnswers.frequency} + 1 >= 3
+              then 'evolving'::auto_answer_state_enum
+            else ${autoAnswers.state}
+          end
+        `,
       })
       .where(eq(autoAnswers.id, matchId));
     return { id: matchId, action: "reinforced" };
