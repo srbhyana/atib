@@ -11,7 +11,7 @@ import {
   index,
   customType,
 } from "drizzle-orm/pg-core";
-import { relations, sql } from "drizzle-orm";
+import { relations } from "drizzle-orm";
 
 // ─── Custom pgvector type ──────────────────────────────────────────
 const vector = customType<{ data: number[]; driverParam: string }>({
@@ -161,8 +161,12 @@ export const workspaceConfig = pgTable("workspace_config", {
   workspaceId: uuid("workspace_id")
     .primaryKey()
     .references(() => workspaces.id, { onDelete: "cascade" }),
-  focusAreas: jsonb("focus_areas").default(sql`'["enablement"]'::jsonb`).notNull(),
-  moduleOverrides: jsonb("module_overrides").default(sql`'{}'::jsonb`).notNull(),
+  // Plain-string defaults Postgres coerces to jsonb. Matches the pattern
+  // every other jsonb column in this schema uses (auto_answers.alternatives,
+  // soap_notes.confidence, etc.). The sql`` literal form trips drizzle-kit
+  // push in some environments.
+  focusAreas: jsonb("focus_areas").default('["enablement"]').notNull(),
+  moduleOverrides: jsonb("module_overrides").default('{}').notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

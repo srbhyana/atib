@@ -49,14 +49,19 @@ const STAGE_PMF_MIN = 30;
 const STAGE_SCALE_MIN = 300;
 
 export async function computeStage(workspaceId: string): Promise<Stage> {
-  const [row] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(transcripts)
-    .where(eq(transcripts.workspaceId, workspaceId));
-  const count = row?.count ?? 0;
-  if (count >= STAGE_SCALE_MIN) return "scale";
-  if (count >= STAGE_PMF_MIN) return "pmf";
-  return "pre_pmf";
+  try {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(transcripts)
+      .where(eq(transcripts.workspaceId, workspaceId));
+    const count = row?.count ?? 0;
+    if (count >= STAGE_SCALE_MIN) return "scale";
+    if (count >= STAGE_PMF_MIN) return "pmf";
+    return "pre_pmf";
+  } catch (err) {
+    console.warn("computeStage failed, defaulting to pmf:", err);
+    return "pmf";
+  }
 }
 
 function isFocusArea(v: unknown): v is FocusArea {
@@ -81,36 +86,44 @@ function coerceOverrides(raw: unknown): Record<string, boolean> {
 export async function getOrCreateWorkspaceConfig(
   workspaceId: string
 ): Promise<WorkspaceConfigShape> {
-  const [row] = await db
-    .select({
-      focusAreas: workspaceConfig.focusAreas,
-      moduleOverrides: workspaceConfig.moduleOverrides,
-    })
-    .from(workspaceConfig)
-    .where(eq(workspaceConfig.workspaceId, workspaceId))
-    .limit(1);
-
-  if (row) {
-    return {
-      focusAreas: coerceFocusAreas(row.focusAreas),
-      moduleOverrides: coerceOverrides(row.moduleOverrides),
-    };
-  }
-
-  // Default config — created lazily on first read so workspaces created
-  // before this table existed don't need a separate backfill migration.
+  // Hard-default that survives schema-out-of-sync, table-missing, and
+  // first-deploy-before-push scenarios. The dashboard NEVER 500s because
+  // this couldn't read — it just falls back to a sane enablement default.
   const defaults: WorkspaceConfigShape = {
     focusAreas: ["enablement"],
     moduleOverrides: {},
   };
-  await db
-    .insert(workspaceConfig)
-    .values({
-      workspaceId,
-      focusAreas: defaults.focusAreas,
-      moduleOverrides: defaults.moduleOverrides,
-    })
-    .onConflictDoNothing();
+
+  try {
+    const [row] = await db
+      .select({
+        focusAreas: workspaceConfig.focusAreas,
+        moduleOverrides: workspaceConfig.moduleOverrides,
+      })
+      .from(workspaceConfig)
+      .where(eq(workspaceConfig.workspaceId, workspaceId))
+      .limit(1);
+
+    if (row) {
+      return {
+        focusAreas: coerceFocusAreas(row.focusAreas),
+        moduleOverrides: coerceOverrides(row.moduleOverrides),
+      };
+    }
+
+    // Lazy create. onConflictDoNothing protects against the race when
+    // two dashboard loads land for a brand-new workspace at once.
+    await db
+      .insert(workspaceConfig)
+      .values({
+        workspaceId,
+        focusAreas: defaults.focusAreas,
+        moduleOverrides: defaults.moduleOverrides,
+      })
+      .onConflictDoNothing();
+  } catch (err) {
+    console.warn("getOrCreateWorkspaceConfig fell back to defaults:", err);
+  }
 
   return defaults;
 }
