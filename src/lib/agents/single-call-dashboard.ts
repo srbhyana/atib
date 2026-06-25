@@ -28,7 +28,6 @@ export interface SingleCallView {
       terminalBenefit: string;
     };
     icpVerdict: string;
-    marketEnemy: string;
     realBlocker: string;
     buyingStage: string;
     pillarAlignment: string[];
@@ -127,7 +126,6 @@ export async function buildSingleCallView(
         terminalBenefit: "",
       },
       icpVerdict: "",
-      marketEnemy: "",
       realBlocker: "",
       buyingStage: "",
       pillarAlignment: [],
