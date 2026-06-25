@@ -156,14 +156,7 @@ function buildHeuristicSoap(
       route: "competitor_radar",
       sourceSection: "objective",
       competitorTagged: mentionedCompetitors[0],
-      // v3.1 framework defaults (heuristic can't infer these reliably)
-      switchingForce: "none" as const,
-      needscopeLayer: "rational" as const,
-      marketMaturityScore: 0,
-      ladder: { feature: "", advantage: "", terminalBenefit: "" },
-      seniority: "",
-      industryTagged: "",
-      needGap: "",
+      // Heuristic fallback can't infer confidence reliably; default low.
       confidenceScore: 0.3,
     });
   }
@@ -202,7 +195,6 @@ function buildHeuristicSoap(
     advantage: "",
     terminalBenefit: "",
     reasonToBelieve: "",
-    marketEnemy: "None",
     personaTagged: contact || "Unknown",
     segmentTagged: "mid-market",
     buyingTrigger: "",
@@ -214,8 +206,6 @@ function buildHeuristicSoap(
     kindergartenSummary: "",
     competitors: mentionedCompetitors,
     matchedPillars,
-    popPodMovement: "",
-    fiveCFailures: [],
     championStrength: "",
     hiddenStakeholders: [],
     signals: heuristicSignals,

@@ -59,15 +59,6 @@ export interface SoapOutput {
   confidence: SoapConfidence;
 }
 
-export type SwitchingForce = "push" | "pull" | "anxiety" | "habit" | "none";
-export type NeedscopeLayer = "rational" | "social" | "emotive" | "mixed";
-
-export interface SignalLadder {
-  feature: string;
-  advantage: string;
-  terminalBenefit: string;
-}
-
 export interface SignalOutput {
   title: string;
   content: string;
@@ -83,14 +74,6 @@ export interface SignalOutput {
   route: string;
   sourceSection: string;
   competitorTagged: string;
-  // v3.1 framework tags — per-signal
-  switchingForce: SwitchingForce;
-  needscopeLayer: NeedscopeLayer;
-  marketMaturityScore: number;   // -1.0..+1.0
-  ladder: SignalLadder;
-  seniority: string;
-  industryTagged: string;
-  needGap: string;
   confidenceScore: number;        // 0.0..1.0
 }
 
@@ -115,7 +98,6 @@ export interface AnalysisOutput {
   advantage: string;
   terminalBenefit: string;
   reasonToBelieve: string;
-  marketEnemy: string;
   personaTagged: string;
   segmentTagged: string;
   buyingTrigger: string;
@@ -127,9 +109,9 @@ export interface AnalysisOutput {
   kindergartenSummary: string;
   competitors: string[];
   matchedPillars: string[];
-  popPodMovement: string;
-  fiveCFailures: string[];
-  // v3.1 additions — call-level stakeholder intelligence
+  // v3.1 call-level stakeholder intelligence — kept because the dashboard
+  // surfaces championStrength and hiddenStakeholders directly. Dropped
+  // marketEnemy, popPodMovement, fiveCFailures from v3.2.
   championStrength: "Strong" | "Medium" | "Weak" | "Absent" | "";
   hiddenStakeholders: string[];
   signals: SignalOutput[];

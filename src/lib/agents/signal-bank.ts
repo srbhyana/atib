@@ -132,10 +132,7 @@ export async function ingestSignals(
     const persona = callContext.callLevelPersona || "";
     const segment = callContext.callLevelSegment || "";
 
-    // Scale the float framework scores to integers for storage.
-    // marketMaturityScore: -1.0..+1.0 → -100..+100
-    // confidenceScore: 0.0..1.0 → 0..100
-    const maturity = clampScaled(signal.marketMaturityScore, -1, 1, 100);
+    // Scale the per-signal confidence score (0.0..1.0) into an int (0..100).
     const confidence = clampScaled(signal.confidenceScore, 0, 1, 100, 50);
 
     const [inserted] = await db
@@ -161,18 +158,8 @@ export async function ingestSignals(
         contestedAgainst: contestedAgainstId,
         route: signal.route || "signal_library",
         sourceSection: signal.sourceSection || "",
-        // v3.1 framework tags
-        switchingForce: signal.switchingForce || "",
-        needscopeLayer: signal.needscopeLayer || "",
-        marketMaturityScore: maturity,
-        ladderFeature: signal.ladder?.feature || "",
-        ladderAdvantage: signal.ladder?.advantage || "",
-        ladderTerminalBenefit: signal.ladder?.terminalBenefit || "",
-        seniority: signal.seniority || "",
-        industryTagged: signal.industryTagged || "",
-        needGap: signal.needGap || "",
         confidenceScore: confidence,
-        promptVersion: "v3.1",
+        promptVersion: "v3.2",
       })
       .returning({ id: signals.id });
 

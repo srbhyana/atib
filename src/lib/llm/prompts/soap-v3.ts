@@ -1,21 +1,28 @@
 import type { CanonicalContextBlock } from "@/lib/utils/types";
 
 /**
- * SOAP v3.1 System Prompt
+ * SOAP v3.2 System Prompt
  *
  * Source of truth: atib-spec-v1.md PART 3 + thesis v2.0 §25.
  * This prompt drives the PMM Intelligence Layer.
  * Every word is load-bearing — do not paraphrase or restructure.
  *
- * The exact wording of the [INFER] rule, failure-mode clauses, and
- * privacy redaction instruction are calibrated. Changes must be
- * regression-tested.
- *
- * v3.1 adds (vs v3.0):
- *   - Per-call: championStrength, hiddenStakeholders[]
+ * v3.2 cuts (vs v3.1):
  *   - Per-signal: switchingForce, needscopeLayer, marketMaturityScore,
  *     ladder{feature,advantage,terminalBenefit}, seniority,
- *     industryTagged, needGap, confidenceScore
+ *     industryTagged, needGap. All were stored-and-never-read.
+ *   - Per-call: marketEnemy, popPodMovement, fiveCFailures. Same.
+ *   - confidenceScore stays per-signal (dashboard down-weights low values).
+ *
+ * The prompt is ~40% shorter as a result. Faster + cheaper per call, and
+ * the LLM has fewer fields to mis-extract — quality of what remains
+ * usually goes up.
+ *
+ * Kept because the dashboard reads them: icpVerdict, blockerType,
+ * buyingStage, needGap (call-level), resonanceLayer, terminalBenefit,
+ * reasonToBelieve, buyingTrigger, useCase, kindergartenSummary,
+ * driftScore, championStrength, hiddenStakeholders, personaTagged,
+ * segmentTagged. Per-signal: confidenceScore.
  */
 export function buildSoapPrompt(ctx: CanonicalContextBlock): string {
   const pillarsList = ctx.pillars
@@ -93,7 +100,6 @@ Every section has a soft 100-word cap. Override permission only when verbatim pr
     "advantage": "<the functional advantage that feature delivers>",
     "terminalBenefit": "<the emotional or business outcome the prospect actually wants — the messaging gold>",
     "reasonToBelieve": "<proof point the rep should lead with based on what this call revealed>",
-    "marketEnemy": "<the 'versus' position or market enemy the prospect described, or 'None'>",
     "personaTagged": "<buyer role + seniority>",
     "segmentTagged": "<SMB | mid-market | enterprise — based on company size>",
     "buyingTrigger": "<what specifically caused this prospect to start evaluating now>",
@@ -105,8 +111,6 @@ Every section has a soft 100-word cap. Override permission only when verbatim pr
     "kindergartenSummary": "<one-sentence summary of how the prospect describes what this product does, in language a five-year-old understands. Based on prospect's own words, not marketing copy.>",
     "competitors": [<names of competitors mentioned. Only from: ${competitorNames}, plus any new competitor the prospect named>],
     "matchedPillars": [<pillar strings that were touched. Only from: ${pillarOptions || "(none)"}>],
-    "popPodMovement": "<empty string if no movement detected. Else: 'POD_COLLAPSING: <pillar>' (prospect said competitor also does this) OR 'POP_FAILING: <feature>' (prospect kept asking for basic feature we treat as table stakes)>",
-    "fiveCFailures": [<array of strings. Each entry names a C that failed: 'Customer (prospect could not understand claim)' | 'Context (PESTLE pressure makes claim irrelevant)' | 'Company (prospect citing features we do not have)' | 'Competition (claim no longer differentiated)' | 'Profitability (prospect economically wrong segment)'. Empty array if all pass.>],
     "championStrength": "<Strong | Medium | Weak | Absent | empty-string-if-no-champion-identifiable. Score the champion's strength based on these observable behaviours: speaks >40% of recent meeting, volunteers to bring in other stakeholders, shares internal political context unprompted, uses 'we' not 'you' when describing the evaluation, drives next-step scheduling, is specific about success criteria, names internal obstacles by source. Strong = 5+ of those. Medium = 3-4. Weak = 1-2. Absent = 0 or the deal is single-threaded.>",
     "hiddenStakeholders": [<array of strings. Each string is a stakeholder mentioned but NOT present on the call, expressed as a role + relation. Examples: 'Security team — must approve before pilot', 'CFO — owns budget, has not seen the deck', 'Procurement — will require vendor onboarding'. Empty array if all stakeholders mentioned were on the call.>],
     "signals": [
@@ -125,17 +129,6 @@ Every section has a soft 100-word cap. Override permission only when verbatim pr
         "route": "<customer_language_repo | signal_library | competitor_radar | content_gap_queue | enablement_feed | icp_distribution>",
         "sourceSection": "<subjective | objective | assessment | plan>",
         "competitorTagged": "<competitor name or 'None'>",
-        "switchingForce": "<push | pull | anxiety | habit | none — which Bob Moesta switching force this signal expresses. Push = pain of current state. Pull = appeal of new solution. Anxiety = fear of switching. Habit = inertia of current state. None = signal is not about switching.>",
-        "needscopeLayer": "<rational | social | emotive | mixed — which NeedScope layer this signal operates on. Rational = price, specs, capability. Social = identity, peer alignment, 'people like me'. Emotive = symbolism, unconscious pull, feeling. Mixed = clear blend.>",
-        "marketMaturityScore": <number from -1.0 to 1.0. -1.0 = pure early-market language (innovative, pilot, experiment, transformative). +1.0 = pure late-market language (governance, procurement, audit, compliance, proven). 0 = neutral.>,
-        "ladder": {
-          "feature": "<the specific feature/capability the prospect asked for or referenced. Empty string if not feature-shaped.>",
-          "advantage": "<the functional advantage that feature delivers. Empty string if not derivable.>",
-          "terminalBenefit": "<the emotional or business outcome the prospect actually wants. The messaging gold. Empty string if not derivable.>"
-        },
-        "seniority": "<IC | Manager | Director | VP | CXO | Unknown — the speaker's level if identifiable from role + language>",
-        "industryTagged": "<industry or vertical the prospect operates in, or empty string>",
-        "needGap": "<Awareness | Solution | Value | Enhancement | Expectation — which of the five Need Gaps THIS specific signal indicates. May be empty if not gap-shaped.>",
         "confidenceScore": <number from 0.0 to 1.0. Your self-reported confidence that this signal is well-grounded in the transcript. Factors: was the quote unambiguous, was the prospect speaking from direct experience vs speculating, did multiple parts of the call corroborate, was the rep leading the witness. Be honest — under 0.4 means the signal will be downweighted.>
       }
     ],
