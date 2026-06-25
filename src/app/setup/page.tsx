@@ -8,7 +8,14 @@ const STEPS = [
   { id: 2, label: "Pillars", desc: "Three messaging pillars" },
   { id: 3, label: "Competitors", desc: "Top competitors to track" },
   { id: 4, label: "ICP", desc: "Ideal customer profile" },
-  { id: 5, label: "Team", desc: "Invite your sales reps" },
+  { id: 5, label: "Focus", desc: "What you're working on this quarter" },
+  { id: 6, label: "Team", desc: "Invite your sales reps" },
+];
+
+const FOCUS_AREA_CHOICES: Array<{ id: "enablement" | "competitive" | "positioning"; label: string; desc: string }> = [
+  { id: "enablement", label: "Enablement", desc: "Rep language, battlecards, objection updates. Default for most PMMs." },
+  { id: "competitive", label: "Competitive intelligence", desc: "Competitor tracking, win/loss patterns, mention share." },
+  { id: "positioning", label: "Positioning / strategy", desc: "Drift detection, repositioning, periodic audits." },
 ];
 
 export default function SetupPage() {
@@ -31,8 +38,20 @@ export default function SetupPage() {
     icpCore: "",
     icpAdjacent: "",
     brandVoice: "Direct, plain English, doctor not shaman.",
+    focusAreas: ["enablement"] as Array<"enablement" | "competitive" | "positioning">,
     teamEmails: ["", "", ""],
   });
+
+  function toggleFocusArea(id: "enablement" | "competitive" | "positioning") {
+    setForm((prev) => {
+      const has = prev.focusAreas.includes(id);
+      const next = has
+        ? prev.focusAreas.filter((x) => x !== id)
+        : [...prev.focusAreas, id];
+      // Don't allow empty — default back to enablement.
+      return { ...prev, focusAreas: next.length === 0 ? ["enablement"] : next };
+    });
+  }
 
   // Load existing context
   useEffect(() => {
@@ -111,8 +130,17 @@ export default function SetupPage() {
         }
       }
 
-      // If on team step, send invitations
+      // Step 5: persist workspace focus areas
       if (step === 5) {
+        await fetch("/api/workspace/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ focusAreas: form.focusAreas }),
+        });
+      }
+
+      // If on team step, send invitations
+      if (step === 6) {
         const links: Array<{ email: string; link: string }> = [];
         for (const email of form.teamEmails) {
           if (email.trim()) {
@@ -138,7 +166,7 @@ export default function SetupPage() {
 
   async function nextStep() {
     await saveStep();
-    if (step < 5) {
+    if (step < 6) {
       setStep(step + 1);
     } else {
       router.push("/dashboard");
@@ -228,8 +256,56 @@ export default function SetupPage() {
             </div>
           )}
 
-          {/* Step 5: Team */}
+          {/* Step 5: Focus */}
           {step === 5 && (
+            <div className="space-y-4">
+              <p className="text-sm text-[var(--color-atib-text-muted)]">
+                Pick the workstreams that match your role this quarter. The dashboard shapes itself around your answer. You can change this any time from{" "}
+                <span className="text-[var(--color-atib-text)]">Settings → Workspace</span>.
+              </p>
+              {FOCUS_AREA_CHOICES.map((choice) => {
+                const active = form.focusAreas.includes(choice.id);
+                return (
+                  <button
+                    key={choice.id}
+                    type="button"
+                    onClick={() => toggleFocusArea(choice.id)}
+                    className={`w-full text-left p-4 rounded-lg border transition-colors ${
+                      active
+                        ? "border-[var(--color-atib-accent)]/50 bg-[var(--color-atib-accent)]/10"
+                        : "border-white/10 bg-[var(--color-atib-surface)]/50 hover:border-white/20"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div
+                        className={`mt-1 w-4 h-4 rounded-sm border ${
+                          active
+                            ? "bg-[var(--color-atib-accent)] border-[var(--color-atib-accent)]"
+                            : "border-white/30"
+                        }`}
+                      >
+                        {active ? (
+                          <svg viewBox="0 0 12 12" className="w-4 h-4 text-white" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M2 6l3 3 5-6" />
+                          </svg>
+                        ) : null}
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-[var(--color-atib-text)]">{choice.label}</p>
+                        <p className="text-xs text-[var(--color-atib-text-dim)] mt-0.5">{choice.desc}</p>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+              <p className="text-xs text-[var(--color-atib-text-dim)]">
+                Selected: <span className="text-[var(--color-atib-text-muted)]">{form.focusAreas.join(", ")}</span>
+              </p>
+            </div>
+          )}
+
+          {/* Step 6: Team */}
+          {step === 6 && (
             <div className="space-y-4">
               <p className="text-sm text-[var(--color-atib-text-muted)]">
                 Invite your sales reps. They&apos;ll receive a magic link to sign in — no password needed.
@@ -259,7 +335,7 @@ export default function SetupPage() {
             </button>
             <button onClick={nextStep} disabled={saving} className="btn-primary flex items-center gap-2">
               {saving && <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
-              {step === 5 ? "Complete Setup" : "Next"}
+              {step === 6 ? "Complete Setup" : "Next"}
             </button>
           </div>
         </div>

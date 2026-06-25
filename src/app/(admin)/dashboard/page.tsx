@@ -7,6 +7,8 @@ import { transcripts, signals, autoAnswers, soapNotes, approvedSignals, competit
 import { and, desc, eq, gte, inArray, notInArray, sql, asc } from "drizzle-orm";
 import Link from "next/link";
 import FilterBar, { type FilterValues } from "./_components/FilterBar";
+import { getOrCreateWorkspaceConfig, computeStage } from "@/lib/agents/workspace-config";
+import { getActiveModuleIds } from "@/lib/agents/module-registry";
 
 type Polarity = "Reinforces" | "Contradicts" | "Extends" | "Neutral";
 type Tier = "suggestion" | "evolving" | "contested" | "concrete" | "archived" | "dismissed";
@@ -42,10 +44,19 @@ export default async function DashboardPage({
   const sp = await searchParams;
   const filters = parseFilters(sp);
 
-  const ctx = await getCanonicalContext(session.workspaceId);
-  const data = await loadDashboardData(session.workspaceId, filters);
+  const [ctx, data, wsConfig, stage] = await Promise.all([
+    getCanonicalContext(session.workspaceId),
+    loadDashboardData(session.workspaceId, filters),
+    getOrCreateWorkspaceConfig(session.workspaceId),
+    computeStage(session.workspaceId),
+  ]);
   const pillars = ctx?.pillars ?? ["", "", ""];
   const hasCanonical = pillars.some((p) => p && p.trim().length > 0);
+
+  // Compute which modules render based on focus areas + stage + overrides.
+  // This is the platform-shape lever: the same dashboard renders differently
+  // for an enablement PMM at PMF vs a positioning PMM at pre-PMF.
+  const active = getActiveModuleIds(wsConfig.focusAreas, stage, wsConfig.moduleOverrides);
 
   const drift = computeDriftScore(data.polarityTotals);
   const pillarScores = [1, 2, 3].map((idx) =>
@@ -72,10 +83,14 @@ export default async function DashboardPage({
         }}
       />
 
-      <WhatChangedHero changes={data.whatChanged} window={filters.window} />
+      {active.has("hero") ? (
+        <WhatChangedHero changes={data.whatChanged} window={filters.window} />
+      ) : null}
 
-      <DriftHero score={drift.score} reinforces={data.polarityTotals.reinforces}
-                 contradicts={data.polarityTotals.contradicts} total={data.activeSignalCount} />
+      {active.has("drift_hero") ? (
+        <DriftHero score={drift.score} reinforces={data.polarityTotals.reinforces}
+                   contradicts={data.polarityTotals.contradicts} total={data.activeSignalCount} />
+      ) : null}
 
       {!hasCanonical ? (
         <div className="glass-card p-4 border border-amber-500/30 bg-amber-500/[0.04]">
@@ -90,47 +105,61 @@ export default async function DashboardPage({
         </div>
       ) : null}
 
-      <PillarLights pillars={pillarScores} />
+      {active.has("pillars") ? <PillarLights pillars={pillarScores} /> : null}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <IcpDistribution
-          buckets={data.icpFromVerdict.buckets}
-          total={data.icpFromVerdict.total}
-          winRates={data.icpFromVerdict.winRates}
-          trend={data.icpTrend}
-          fallbackBuckets={data.icpBuckets}
-          fallbackTotal={data.icpTotal}
+      {active.has("icp") || active.has("blocker") ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {active.has("icp") ? (
+            <IcpDistribution
+              buckets={data.icpFromVerdict.buckets}
+              total={data.icpFromVerdict.total}
+              winRates={data.icpFromVerdict.winRates}
+              trend={data.icpTrend}
+              fallbackBuckets={data.icpBuckets}
+              fallbackTotal={data.icpTotal}
+            />
+          ) : null}
+          {active.has("blocker") ? (
+            <BlockerDistribution
+              buckets={data.blockerFromVerdict.buckets}
+              total={data.blockerFromVerdict.total}
+              fallbackBuckets={data.blockerBuckets}
+              fallbackTotal={data.blockerTotal}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
+      {active.has("top_signals") ? <TopSignalsTable rows={data.topSignals} /> : null}
+
+      {active.has("contested") ? (
+        <ContestedQueue signals={data.contestedWithCanon} callCount={data.callCount} />
+      ) : null}
+
+      {active.has("auto_answers") ? <AutoAnswersQueue rows={data.autoAnswers} /> : null}
+
+      {active.has("competitor") || active.has("benefits") ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {active.has("competitor") ? <CompetitorIntel rows={data.competitorStats} /> : null}
+          {active.has("benefits") ? <TerminalBenefits rows={data.terminalBenefits} /> : null}
+        </div>
+      ) : null}
+
+      {active.has("enablement") ? (
+        <EnablementOpportunities rows={data.enablementSignals} progressedCount={data.outcomes.progressed} />
+      ) : null}
+
+      {active.has("interpretation") ? (
+        <Interpretation
+          ctx={{
+            callCount: data.callCount,
+            pillarScores: pillarScores.map((p) => ({ title: p.title, score: p.score })),
+            topBlocker: pickTop(data.blockerBuckets),
+            corePct: pctOrNull(data.icpBuckets.Core, data.icpTotal),
+            contestedCount: data.contestedSignals.length,
+          }}
         />
-        <BlockerDistribution
-          buckets={data.blockerFromVerdict.buckets}
-          total={data.blockerFromVerdict.total}
-          fallbackBuckets={data.blockerBuckets}
-          fallbackTotal={data.blockerTotal}
-        />
-      </div>
-
-      <TopSignalsTable rows={data.topSignals} />
-
-      <ContestedQueue signals={data.contestedWithCanon} callCount={data.callCount} />
-
-      <AutoAnswersQueue rows={data.autoAnswers} />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <CompetitorIntel rows={data.competitorStats} />
-        <TerminalBenefits rows={data.terminalBenefits} />
-      </div>
-
-      <EnablementOpportunities rows={data.enablementSignals} progressedCount={data.outcomes.progressed} />
-
-      <Interpretation
-        ctx={{
-          callCount: data.callCount,
-          pillarScores: pillarScores.map((p) => ({ title: p.title, score: p.score })),
-          topBlocker: pickTop(data.blockerBuckets),
-          corePct: pctOrNull(data.icpBuckets.Core, data.icpTotal),
-          contestedCount: data.contestedSignals.length,
-        }}
-      />
+      ) : null}
     </div>
   );
 }

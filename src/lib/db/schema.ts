@@ -11,7 +11,7 @@ import {
   index,
   customType,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ─── Custom pgvector type ──────────────────────────────────────────
 const vector = customType<{ data: number[]; driverParam: string }>({
@@ -143,6 +143,28 @@ export const workspaces = pgTable("workspaces", {
   plan: planEnum("plan").default("beta").notNull(),
   anthropicApiKey: text("anthropic_api_key"), // encrypted — per-workspace
   openaiApiKey: text("openai_api_key"),       // encrypted — per-workspace
+});
+
+/**
+ * Workspace-level configuration that shapes the surface the PMM sees.
+ * One row per workspace, created on demand. Stage is computed at read
+ * time from transcript count (not stored) so it always reflects reality.
+ *
+ * focus_areas drives which dashboard modules show by default. A workspace
+ * can have one or more active focus areas (typically one, sometimes two
+ * for PMMs who split their time).
+ *
+ * module_overrides lets a PMM explicitly enable/disable a module by id,
+ * overriding the focus-area + stage default. Empty {} = use defaults.
+ */
+export const workspaceConfig = pgTable("workspace_config", {
+  workspaceId: uuid("workspace_id")
+    .primaryKey()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  focusAreas: jsonb("focus_areas").default(sql`'["enablement"]'::jsonb`).notNull(),
+  moduleOverrides: jsonb("module_overrides").default(sql`'{}'::jsonb`).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 // People

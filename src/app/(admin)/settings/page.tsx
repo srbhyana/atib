@@ -634,16 +634,148 @@ function SignalsImporter() {
   );
 }
 
+type FocusArea = "enablement" | "competitive" | "positioning";
+
+const FOCUS_AREA_CHOICES: Array<{ id: FocusArea; label: string; desc: string }> = [
+  { id: "enablement", label: "Enablement", desc: "Rep language, battlecards, objection updates." },
+  { id: "competitive", label: "Competitive intelligence", desc: "Competitor tracking, win/loss patterns, mention share." },
+  { id: "positioning", label: "Positioning / strategy", desc: "Drift detection, repositioning, periodic audits." },
+];
+
 function WorkspaceTab() {
+  const [focusAreas, setLocalFocusAreas] = useState<FocusArea[]>(["enablement"]);
+  const [stage, setStage] = useState<string>("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/workspace/config");
+        const json = await res.json();
+        if (!cancelled && json.ok) {
+          setLocalFocusAreas(Array.isArray(json.focusAreas) ? json.focusAreas : ["enablement"]);
+          setStage(typeof json.stage === "string" ? json.stage : "");
+        }
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  function toggle(id: FocusArea) {
+    setLocalFocusAreas((prev) => {
+      const has = prev.includes(id);
+      const next = has ? prev.filter((x) => x !== id) : [...prev, id];
+      return next.length === 0 ? ["enablement"] : next;
+    });
+  }
+
+  async function save() {
+    setSaving(true);
+    setMessage("");
+    try {
+      const res = await fetch("/api/workspace/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ focusAreas }),
+      });
+      const json = await res.json();
+      if (res.ok && json.ok) {
+        setMessage("Saved. The dashboard will reshape on next load.");
+      } else {
+        setMessage(json.error || "Failed to save.");
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const stageLabel =
+    stage === "pre_pmf" ? "Pre-PMF — under 30 transcripts processed"
+    : stage === "pmf" ? "PMF — 30 to 300 transcripts processed"
+    : stage === "scale" ? "Scale — 300+ transcripts processed"
+    : "—";
+
   return (
-    <div className="glass-card p-6 space-y-4 max-w-2xl">
-      <div>
-        <h3 className="text-sm font-semibold mb-1">Workspace</h3>
-        <p className="text-xs text-[var(--color-atib-text-dim)]">
-          Workspace configuration coming in v1.1.
-        </p>
+    <div className="space-y-6 max-w-2xl">
+      <div className="glass-card p-6 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold mb-1">Focus areas</h3>
+          <p className="text-xs text-[var(--color-atib-text-dim)]">
+            What you&apos;re working on this quarter. Shapes which dashboard modules show by default. Multi-select, but one is normal.
+          </p>
+        </div>
+        {!loaded ? (
+          <p className="text-xs text-[var(--color-atib-text-dim)]">Loading...</p>
+        ) : (
+          <div className="space-y-3">
+            {FOCUS_AREA_CHOICES.map((choice) => {
+              const active = focusAreas.includes(choice.id);
+              return (
+                <button
+                  key={choice.id}
+                  type="button"
+                  onClick={() => toggle(choice.id)}
+                  className={`w-full text-left p-4 rounded-lg border transition-colors ${
+                    active
+                      ? "border-[var(--color-atib-accent)]/50 bg-[var(--color-atib-accent)]/10"
+                      : "border-white/10 bg-[var(--color-atib-surface)]/50 hover:border-white/20"
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={`mt-1 w-4 h-4 rounded-sm border ${
+                        active
+                          ? "bg-[var(--color-atib-accent)] border-[var(--color-atib-accent)]"
+                          : "border-white/30"
+                      }`}
+                    >
+                      {active ? (
+                        <svg viewBox="0 0 12 12" className="w-4 h-4 text-white" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M2 6l3 3 5-6" />
+                        </svg>
+                      ) : null}
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-[var(--color-atib-text)]">{choice.label}</p>
+                      <p className="text-xs text-[var(--color-atib-text-dim)] mt-0.5">{choice.desc}</p>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {message ? (
+          <p className="text-xs text-[var(--color-atib-text-muted)]">{message}</p>
+        ) : null}
+        <button
+          onClick={save}
+          disabled={saving || !loaded}
+          className="btn-primary inline-flex items-center gap-2"
+        >
+          {saving ? (
+            <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : null}
+          {saving ? "Saving..." : "Save"}
+        </button>
       </div>
-      <div className="p-4 rounded-lg bg-[var(--color-atib-surface)]/50 text-sm text-[var(--color-atib-text-muted)]">
+
+      <div className="glass-card p-6 space-y-2">
+        <h3 className="text-sm font-semibold">Stage</h3>
+        <p className="text-xs text-[var(--color-atib-text-dim)]">
+          Computed from transcript count. Not a setting — it reflects what&apos;s actually in your workspace.
+        </p>
+        <p className="text-sm text-[var(--color-atib-text-muted)] mt-2">{stageLabel}</p>
+      </div>
+
+      <div className="glass-card p-4 bg-[var(--color-atib-surface)]/40 text-xs text-[var(--color-atib-text-muted)]">
         Plan: <span className="text-[var(--color-atib-accent)] font-medium">Beta (Free)</span>
       </div>
     </div>
